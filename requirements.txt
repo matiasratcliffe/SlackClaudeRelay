@@ -1,0 +1,3 @@
+slack_bolt==1.30.0
+slack_sdk==3.43.0
+truststore==0.10.4
