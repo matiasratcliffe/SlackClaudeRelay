@@ -20,6 +20,23 @@ import os
 import shutil
 import ssl
 import subprocess
+from pathlib import Path
+
+
+def _load_dotenv() -> None:
+    """Minimal .env loader (no dependency). KEY=VALUE lines, # comments."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip())
+
+
+_load_dotenv()
 
 # Corp networks do TLS interception; make ALL ssl (slack_sdk http + the Socket
 # Mode websocket) trust the Windows cert store, which has the corp CA. Must run
