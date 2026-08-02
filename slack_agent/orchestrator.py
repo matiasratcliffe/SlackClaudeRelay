@@ -38,7 +38,6 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
@@ -69,10 +68,8 @@ logging.basicConfig(
 logger = logging.getLogger("orchestrator")
 
 TARGET_CHANNEL = os.environ.get("SLACK_CHANNEL", "general-personal")
-MENTION = "<@U0BLY0DHJF8>"  # hardcoded @mati.ratcliffe
-ALLOWED_USERS = {
-    u.strip() for u in os.environ.get("SLACK_ALLOWED_USERS", "").split(",") if u.strip()
-}
+OWNER_USER = "U0BLY0DHJF8"  # mati.ratcliffe — the ONLY user the orchestrator obeys
+MENTION = f"<@{OWNER_USER}>"
 TELEGRAM_MAX = 4096  # Slack single-message char cap is also 4096.
 
 # The ChatGPT Slack app appends "*Enviado usando* <@...>"; strip it off inputs.
@@ -178,30 +175,16 @@ async def can_use_tool(tool_name, input_data, context):
             updated_input={"questions": questions, "answers": answers}
         )
 
+    # Autonomous by default: allow anything not on the guard list.
+    if not is_guarded(tool_name, input_data):
+        return PermissionResultAllow(updated_input=input_data)
+
     # Guarded action: ask for yes/no approval.
     desc = input_data.get("command") if tool_name == "Bash" else str(input_data)
     reply = (await ask_user(f":lock: Approve `{tool_name}`: `{desc}` ?  (yes/no)")).strip().lower()
     if reply in ("y", "yes", "ok", "approve", "si", "sí", "dale"):
         return PermissionResultAllow(updated_input=input_data)
     return PermissionResultDeny(message=f"User denied: {reply!r}")
-
-
-# --------------------------------------------------------------------------- #
-# Guard hook: stamp guarded tool calls as "ask" so they hit can_use_tool even
-# under bypassPermissions.
-# --------------------------------------------------------------------------- #
-async def pre_tool_guard(input_data, tool_use_id, context):
-    tool_name = input_data.get("tool_name", "")
-    tool_input = input_data.get("tool_input", {}) or {}
-    if is_guarded(tool_name, tool_input):
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": "guarded command requires Slack approval",
-            }
-        }
-    return {}
 
 
 # --------------------------------------------------------------------------- #
@@ -231,8 +214,8 @@ async def on_message(event, logger):
         return
     if event.get("channel") != S.channel_id:
         return
-    user = event.get("user")
-    if ALLOWED_USERS and user not in ALLOWED_USERS:
+    # Hardcoded safeguard: obey only the owner (mati.ratcliffe).
+    if event.get("user") != OWNER_USER:
         return
 
     text = strip_footer((event.get("text") or "").strip())
@@ -258,12 +241,10 @@ async def main() -> None:
     S.app.event("message")(on_message)
 
     # Resolve target channel -> id (bot must be a member).
-    async for page in await _iter_conversations(S.app):
-        for ch in page["channels"]:
-            if ch["name"] == TARGET_CHANNEL:
-                S.channel_id = ch["id"]
-                break
-        if S.channel_id:
+    resp = await S.app.client.users_conversations(types="public_channel", limit=200)
+    for ch in resp["channels"]:
+        if ch["name"] == TARGET_CHANNEL:
+            S.channel_id = ch["id"]
             break
     if not S.channel_id:
         raise SystemExit(f"Channel '{TARGET_CHANNEL}' not found among bot's channels.")
@@ -279,9 +260,12 @@ async def main() -> None:
         # CLAUDE.md, permissions, plus project/local for the working repo.
         setting_sources=["user", "project", "local"],
         skills="all",
-        permission_mode="bypassPermissions",
+        # "default" (NOT bypassPermissions) so can_use_tool is actually consulted
+        # for every tool call. The callback auto-allows everything except the
+        # guarded few, which it routes to Slack for approval. bypassPermissions
+        # would shadow the callback entirely (SDK warns about this).
+        permission_mode="default",
         can_use_tool=can_use_tool,
-        hooks={"PreToolUse": [HookMatcher(hooks=[pre_tool_guard])]},
         cwd=resolve_cwd(),
     )
     logger.info("Orchestrator working dir: %s", options.cwd)
@@ -292,11 +276,6 @@ async def main() -> None:
         handler = AsyncSocketModeHandler(S.app, app_token)
         logger.info("Listening on #%s (%s)", TARGET_CHANNEL, S.channel_id)
         await handler.start_async()
-
-
-async def _iter_conversations(app):
-    """users_conversations returns an async paginator; wrap for a simple loop."""
-    return app.client.users_conversations(types="public_channel", limit=200)
 
 
 if __name__ == "__main__":
