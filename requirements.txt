@@ -1,3 +1,6 @@
 slack_bolt==1.30.0
 slack_sdk==3.43.0
 truststore==0.10.4
+# Orchestrator (persistent streaming Claude session driven from Slack):
+claude-agent-sdk==0.2.128
+aiohttp==3.14.3
