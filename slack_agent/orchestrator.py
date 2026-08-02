@@ -70,6 +70,8 @@ logger = logging.getLogger("orchestrator")
 TARGET_CHANNEL = os.environ.get("SLACK_CHANNEL", "general-personal")
 OWNER_USER = "U0BLY0DHJF8"  # mati.ratcliffe — the ONLY user the orchestrator obeys
 MENTION = f"<@{OWNER_USER}>"
+# Fixed session id -> persists across restarts + appears in Claude GUI recents.
+ORCH_SESSION_ID = os.environ.get("ORCH_SESSION_ID", "0c1e5d2a-0b17-4e57-9a11-0c1e5d2a0b17")
 TELEGRAM_MAX = 4096  # Slack single-message char cap is also 4096.
 
 # The ChatGPT Slack app appends "*Enviado usando* <@...>"; strip it off inputs.
@@ -111,10 +113,21 @@ def resolve_cwd(argv: list[str] | None = None) -> str:
 
 
 def is_guarded(tool_name: str, tool_input: dict) -> bool:
-    if tool_name == "Bash":
+    # The model may run shell commands via either the Bash or PowerShell tool.
+    if tool_name in ("Bash", "PowerShell"):
         cmd = tool_input.get("command", "") or ""
         return any(p.search(cmd) for p in GUARD_PATTERNS)
     return False
+
+
+def session_kwargs() -> dict:
+    """Resume the fixed Orchestrator session if its transcript exists (persists
+    memory across restarts), else start it with that id. Either way the session
+    lands in ~/.claude/projects/<cwd>/<id>.jsonl so it shows in the GUI recents."""
+    sid = ORCH_SESSION_ID
+    proj = re.sub(r"[^A-Za-z0-9]", "-", resolve_cwd())
+    path = Path.home() / ".claude" / "projects" / proj / f"{sid}.jsonl"
+    return {"resume": sid} if path.exists() else {"session_id": sid}
 
 
 # --------------------------------------------------------------------------- #
@@ -125,7 +138,8 @@ class State:
     channel_id: str | None = None
     app: AsyncApp | None = None
     query_lock = asyncio.Lock()
-    pending: asyncio.Future | None = None  # set while awaiting a Slack reply
+    pending: dict[str, asyncio.Future] = {}  # qid -> future awaiting a Slack reply
+    qcounter: int = 0
 
 
 S = State()
@@ -141,15 +155,20 @@ async def post(text: str, mention: bool = False) -> None:
         )
 
 
-async def ask_user(prompt_text: str) -> str:
-    """Post a question/approval to Slack and block until the user replies."""
+async def ask_user(body: str) -> str:
+    """Post a tagged question/approval to Slack and block until the user replies
+    to THAT tag. Multiple questions can be outstanding at once (concurrent
+    subagents); each gets its own [Qn] tag so replies are unambiguous."""
+    S.qcounter += 1
+    qid = f"Q{S.qcounter}"
     loop = asyncio.get_running_loop()
-    S.pending = loop.create_future()
-    await post(prompt_text, mention=True)
+    fut = loop.create_future()
+    S.pending[qid] = fut
+    await post(f"*[{qid}]* {body}\n_reply `{qid} <answer>`_", mention=True)
     try:
-        return await S.pending
+        return await fut
     finally:
-        S.pending = None
+        S.pending.pop(qid, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -179,9 +198,15 @@ async def can_use_tool(tool_name, input_data, context):
     if not is_guarded(tool_name, input_data):
         return PermissionResultAllow(updated_input=input_data)
 
-    # Guarded action: ask for yes/no approval.
-    desc = input_data.get("command") if tool_name == "Bash" else str(input_data)
-    reply = (await ask_user(f":lock: Approve `{tool_name}`: `{desc}` ?  (yes/no)")).strip().lower()
+    # Guarded action: ask for yes/no approval, with the actual command as context.
+    desc = (
+        input_data.get("command")
+        if tool_name in ("Bash", "PowerShell")
+        else str(input_data)[:300]
+    )
+    reply = (
+        await ask_user(f":lock: guarded `{tool_name}`\n```{desc}```\napprove? (yes/no)")
+    ).strip().lower()
     if reply in ("y", "yes", "ok", "approve", "si", "sí", "dale"):
         return PermissionResultAllow(updated_input=input_data)
     return PermissionResultDeny(message=f"User denied: {reply!r}")
@@ -222,12 +247,24 @@ async def on_message(event, logger):
     if not text:
         return
 
-    # If the Orchestrator is waiting on us, this message is the answer.
-    if S.pending is not None and not S.pending.done():
-        S.pending.set_result(text)
+    # If questions are open, route this message to one of them.
+    if S.pending:
+        m = re.match(r"^\s*(Q\d+)\b[:\s]*(.*)$", text, re.IGNORECASE | re.DOTALL)
+        if m and m.group(1).upper() in S.pending:
+            S.pending[m.group(1).upper()].set_result(m.group(2).strip())
+            return
+        if len(S.pending) == 1:  # single open question -> bare reply answers it
+            next(iter(S.pending.values())).set_result(text)
+            return
+        await post(
+            "Open questions: "
+            + ", ".join(sorted(S.pending))
+            + " — reply with the tag, e.g. `Q1 yes`.",
+            mention=True,
+        )
         return
 
-    logger.info("query from %s: %s", user, text[:120])
+    logger.info("query: %s", text[:120])
     asyncio.create_task(handle_query(text))
 
 
@@ -267,8 +304,13 @@ async def main() -> None:
         permission_mode="default",
         can_use_tool=can_use_tool,
         cwd=resolve_cwd(),
+        **session_kwargs(),
     )
-    logger.info("Orchestrator working dir: %s", options.cwd)
+    logger.info(
+        "Orchestrator working dir: %s | session: %s",
+        options.cwd,
+        ORCH_SESSION_ID,
+    )
 
     logger.info("Orchestrator connecting Claude session…")
     async with ClaudeSDKClient(options=options) as client:
