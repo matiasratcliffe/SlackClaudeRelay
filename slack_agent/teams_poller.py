@@ -33,6 +33,45 @@ logger = logging.getLogger("teams_poller")
 teams_seen: list = []
 
 
+async def _run_teams(subcmd: str) -> tuple[int, str]:
+    """Run `teams <subcmd>` capturing combined output. Returns (returncode, text)."""
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            f"{TEAMS_CMD} {subcmd}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+    except Exception as e:
+        logger.error("teams %s: failed to launch: %s", subcmd, e)
+        return 1, ""
+    return proc.returncode, out.decode(errors="replace").strip()
+
+
+async def teams_preflight() -> bool:
+    """Run once on startup, before the poll loop. Returns True if the poller
+    should run. Verifies authentication (skips on 'not authenticated'), then
+    ensures the Teams daemon is up (starting it if 'not running')."""
+    _, status = await _run_teams("status")
+    if status.lower().startswith("authenticated"):
+        logger.info("Teams: %s", status)
+    else:  # "not authenticated — run: teams login (...)" or unexpected
+        logger.warning(
+            "Teams not authenticated — skipping poller. Run `teams login`. (%s)",
+            status.splitlines()[0] if status else "no output",
+        )
+        return False
+
+    _, dstat = await _run_teams("daemon status")
+    if dstat.lower().startswith("running"):
+        logger.info("Teams daemon: %s", dstat)
+    else:  # "not running"
+        logger.info("Teams daemon not running — starting it (`teams daemon start`)")
+        _, dstart = await _run_teams("daemon start")
+        logger.info("Teams daemon start: %s", dstart.splitlines()[-1] if dstart else "(no output)")
+    return True
+
+
 async def poll_teams_unreads(post) -> list:
     """One poll cycle: run `teams unreads --json`, and for every unread element
     not already in `teams_seen`, call `post(text, mention=True)` (tagging the

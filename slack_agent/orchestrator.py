@@ -51,7 +51,7 @@ from .config import (
 from .interaction import QuestionQueue
 from .permissions import make_can_use_tool
 from .slack_io import Poster, resolve_channel_id, strip_footer
-from .teams_poller import poll_teams_unreads
+from .teams_poller import poll_teams_unreads, teams_preflight
 
 logger = logging.getLogger("orchestrator")
 
@@ -119,7 +119,6 @@ async def main() -> None:
 
         async def teams_poll_loop() -> None:
             interval = POLL_TIME_SPAN_MINUTES * 60
-            logger.info("Teams poll loop started (every %d min)", POLL_TIME_SPAN_MINUTES)
             while True:
                 try:
                     await poll_teams_unreads(poster.post)
@@ -127,10 +126,14 @@ async def main() -> None:
                     logger.error("teams poll loop: %s", e)
                 await asyncio.sleep(interval)
 
-        if TEAMS_POLL_ENABLED:
+        # Teams setup: synchronous preflight (auth + daemon) before the poller.
+        if not TEAMS_POLL_ENABLED:
+            logger.info("Teams poll loop disabled (TEAMS_POLL_ENABLED)")
+        elif await teams_preflight():
+            logger.info("Kicking off Teams poller every %d min", POLL_TIME_SPAN_MINUTES)
             asyncio.create_task(teams_poll_loop())
         else:
-            logger.info("Teams poll loop disabled (TEAMS_POLL_ENABLED)")
+            logger.info("Teams poller skipped (see warning above)")
 
         logger.info("Listening on #%s (%s)", TARGET_CHANNEL, channel_id)
         await AsyncSocketModeHandler(app, SLACK_APP_TOKEN).start_async()
