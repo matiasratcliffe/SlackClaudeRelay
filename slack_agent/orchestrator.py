@@ -269,7 +269,16 @@ async def main() -> None:
         raise SystemExit(f"Channel '{TARGET_CHANNEL}' not found among bot's channels.")
 
     options = ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
+        # Full Claude Code system prompt + our orchestrator note appended.
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": SYSTEM_PROMPT,
+        },
+        # Inherit ALL of the user's ~/.claude context: settings, hooks,
+        # CLAUDE.md, permissions, plus project/local for the working repo.
+        setting_sources=["user", "project", "local"],
+        skills="all",
         permission_mode="bypassPermissions",
         can_use_tool=can_use_tool,
         hooks={"PreToolUse": [HookMatcher(hooks=[pre_tool_guard])]},
