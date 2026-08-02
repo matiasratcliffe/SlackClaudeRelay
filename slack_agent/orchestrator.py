@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import re
@@ -44,6 +43,8 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
 )
+
+from slack_agent.teams_poller import POLL_TIME_SPAN_MINUTES, poll_teams_unreads
 
 
 # --------------------------------------------------------------------------- #
@@ -92,14 +93,6 @@ GUARD_PATTERNS = [
     re.compile(r"\brm\s+-rf\b"),
     re.compile(r"--force\b|\s-f\b"),
 ]
-
-# --- Teams unread poller ---
-POLL_TIME_SPAN_MINUTES = int(os.environ.get("POLL_TIME_SPAN_MINUTES", "10"))
-TEAMS_CMD = os.environ.get("TEAMS_CMD", "teams")  # `teams` CLI on PATH
-# In-memory record of unread elements already seen. Starts empty; grows over the
-# process lifetime so each unread is announced to Slack only once.
-teams_seen: list = []
-
 
 SYSTEM_PROMPT = (
     "You are an autonomous orchestrator that the user drives from Slack. Work "
@@ -167,55 +160,17 @@ async def post(text: str, mention: bool = False) -> None:
         )
 
 
-async def poll_teams_unreads() -> list:
-    """One poll cycle: run `teams unreads --json`, and for every unread element
-    not already in `teams_seen`, post it to the Slack channel (tagging the
-    owner). New elements are added to `teams_seen`. Returns the new elements.
-
-    Safe to call independently for testing; never raises — logs and returns []
-    on any failure so a background loop can't be killed by a bad poll."""
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            f"{TEAMS_CMD} unreads --json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate()
-    except Exception as e:
-        logger.error("teams poll: failed to launch CLI: %s", e)
-        return []
-
-    if proc.returncode != 0:
-        logger.error(
-            "teams poll: exit %s: %s",
-            proc.returncode,
-            err.decode(errors="replace").strip()[:300],
-        )
-        return []
-
-    text = out.decode(errors="replace").strip()
-    try:
-        items = json.loads(text) if text else []
-    except json.JSONDecodeError:
-        logger.error("teams poll: non-JSON output: %s", text[:200])
-        return []
-    if not isinstance(items, list):
-        return []
-
-    new = [x for x in items if x not in teams_seen]
-    if new:
-        teams_seen.extend(new)
-        lines = [f":envelope_with_arrow: *{len(new)}* new Teams unread(s):"]
-        for it in new:
-            if isinstance(it, dict):
-                name = it.get("name", "?")
-                cnt = it.get("count", "")
-                lines.append(f"• {name}" + (f" — {cnt}" if cnt != "" else ""))
-            else:
-                lines.append(f"• {it}")
-        await post("\n".join(lines), mention=True)
-        logger.info("teams poll: %d new unread(s) announced", len(new))
-    return new
+async def teams_poll_loop() -> None:
+    """Background loop: every POLL_TIME_SPAN_MINUTES, poll Teams unreads and
+    announce new ones to Slack. Survives individual poll failures."""
+    interval = POLL_TIME_SPAN_MINUTES * 60
+    logger.info("Teams poll loop started (every %d min)", POLL_TIME_SPAN_MINUTES)
+    while True:
+        try:
+            await poll_teams_unreads(post)
+        except Exception as e:
+            logger.error("teams poll loop: %s", e)
+        await asyncio.sleep(interval)
 
 
 async def ask_user(body: str) -> str:
@@ -378,6 +333,7 @@ async def main() -> None:
     logger.info("Orchestrator connecting Claude session…")
     async with ClaudeSDKClient(options=options) as client:
         S.client = client
+        asyncio.create_task(teams_poll_loop())
         handler = AsyncSocketModeHandler(S.app, app_token)
         logger.info("Listening on #%s (%s)", TARGET_CHANNEL, S.channel_id)
         await handler.start_async()
