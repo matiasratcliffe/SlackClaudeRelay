@@ -1,30 +1,24 @@
-"""Slack-driven Claude orchestrator (persistent, streaming, single serial session).
+"""Slack-driven Claude orchestrator — persistent, streaming, single serial session.
 
-One long-lived Claude Agent SDK session ("the Orchestrator") that you drive from
-Slack. It runs autonomously (bypassPermissions) and dispatches its own subagents.
-A small guard list (e.g. `git push`) is the ONLY thing that pauses for you: a
-PreToolUse hook stamps guarded tool calls as "ask", which routes them into the
-async `can_use_tool` callback -> posted to Slack -> the callback blocks until you
-reply yes/no. The same callback also handles the model's `AskUserQuestion`
-elicitations: the questions are posted to Slack and your reply is fed back.
+A long-lived Claude Agent SDK session the operator drives through a Slack relay.
+It runs autonomously; only guarded shell commands (config.GUARD_PATTERNS) and the
+model's clarifying questions pause and round-trip to Slack via the QuestionQueue.
+A background loop announces new Teams unreads to the same channel.
 
-Design choices (v1):
-  * Architecture: persistent streaming `ClaudeSDKClient` (context accrues in-process).
-  * Autonomy: permission_mode="bypassPermissions" + guard hook -> Slack approval.
-  * Concurrency: single serial session. Your next Slack message while the
-    Orchestrator is waiting on you IS treated as your answer.
+This module is just wiring — behavior lives in the focused modules it imports:
+  config        settings + session/cwd resolution
+  slack_io      channel resolution + chunked posting + input cleaning
+  interaction   the tagged question queue (approvals + elicitation plumbing)
+  permissions   the can_use_tool policy (autonomous-unless-guarded)
+  teams_poller  the Teams-unread poll
 
 Run:  .venv/Scripts/python.exe -m slack_agent.orchestrator
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
-import os
-import re
-from pathlib import Path
 
 # Corp TLS interception: trust the Windows cert store for all HTTPS. First.
 import truststore
@@ -38,306 +32,108 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    PermissionResultAllow,
-    PermissionResultDeny,
     ResultMessage,
     TextBlock,
 )
 
-from slack_agent.teams_poller import POLL_TIME_SPAN_MINUTES, poll_teams_unreads
-
-
-# --------------------------------------------------------------------------- #
-# Config (reuses the same .env as the Slack relay bot).
-# --------------------------------------------------------------------------- #
-def _load_dotenv() -> None:
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
-
-
-_load_dotenv()
-
-logging.basicConfig(
-    format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
+from .config import (
+    ORCH_SESSION_ID,
+    OWNER_USER,
+    POLL_TIME_SPAN_MINUTES,
+    SLACK_APP_TOKEN,
+    SLACK_BOT_TOKEN,
+    SYSTEM_PROMPT,
+    TARGET_CHANNEL,
+    resolve_cwd,
+    session_kwargs,
 )
+from .interaction import QuestionQueue
+from .permissions import make_can_use_tool
+from .slack_io import Poster, resolve_channel_id, strip_footer
+from .teams_poller import poll_teams_unreads
+
 logger = logging.getLogger("orchestrator")
-
-TARGET_CHANNEL = os.environ.get("SLACK_CHANNEL", "general-personal")
-OWNER_USER = "U0BLY0DHJF8"  # mati.ratcliffe — the ONLY user the orchestrator obeys
-MENTION = f"<@{OWNER_USER}>"
-# The desktop-app-created session the orchestrator drives (so it shows in the
-# GUI recents and updates live). Resumed on every start; override via env.
-ORCH_SESSION_ID = os.environ.get(
-    "ORCH_SESSION_ID", "d0617ad4-028b-49d1-90d0-ac22327d19f1"
-)
-TELEGRAM_MAX = 4096  # Slack single-message char cap is also 4096.
-
-# The ChatGPT Slack app appends "*Enviado usando* <@...>"; strip it off inputs.
-_FOOTER_RE = re.compile(
-    r"\s*\*?\s*enviado usando\s*\*?\s*(?:<@[A-Z0-9]+>|@?\s*chatgpt)\s*$",
-    re.IGNORECASE,
-)
-
-# Guarded Bash commands: the ONLY things that pause for Slack approval.
-# Edit this list to widen/narrow what the Orchestrator must ask about.
-GUARD_PATTERNS = [
-    re.compile(r"\bgit\s+push\b"),
-    re.compile(r"\bgit\s+reset\s+--hard\b"),
-    re.compile(r"\brm\s+-rf\b"),
-    re.compile(r"--force\b|\s-f\b"),
-]
-
-SYSTEM_PROMPT = (
-    "You are an autonomous orchestrator that the user drives from Slack. Work "
-    "end-to-end without asking for confirmation, dispatching subagents for "
-    "substantial work. Keep Slack replies concise. Only pause to ask when you "
-    "genuinely need a decision only the user can make, or when a guarded action "
-    "requires approval."
-)
-
-
-def strip_footer(text: str) -> str:
-    return _FOOTER_RE.sub("", text).strip()
-
-
-def resolve_cwd(argv: list[str] | None = None) -> str:
-    """Working dir for the Orchestrator. Precedence: --cwd flag > ORCH_CWD env >
-    default ~/Repos."""
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--cwd", default=None)
-    args, _ = parser.parse_known_args(argv)
-    base = args.cwd or os.environ.get("ORCH_CWD") or str(Path.home() / "Repos")
-    return str(Path(base).expanduser())
-
-
-def is_guarded(tool_name: str, tool_input: dict) -> bool:
-    # The model may run shell commands via either the Bash or PowerShell tool.
-    if tool_name in ("Bash", "PowerShell"):
-        cmd = tool_input.get("command", "") or ""
-        return any(p.search(cmd) for p in GUARD_PATTERNS)
-    return False
-
-
-def session_kwargs() -> dict:
-    """Resume the fixed Orchestrator session if its transcript exists (persists
-    memory across restarts), else start it with that id. Either way the session
-    lands in ~/.claude/projects/<cwd>/<id>.jsonl so it shows in the GUI recents."""
-    sid = ORCH_SESSION_ID
-    proj = re.sub(r"[^A-Za-z0-9]", "-", resolve_cwd())
-    path = Path.home() / ".claude" / "projects" / proj / f"{sid}.jsonl"
-    return {"resume": sid} if path.exists() else {"session_id": sid}
-
-
-# --------------------------------------------------------------------------- #
-# Runtime state (single serial session).
-# --------------------------------------------------------------------------- #
-class State:
-    client: ClaudeSDKClient | None = None
-    channel_id: str | None = None
-    app: AsyncApp | None = None
-    query_lock = asyncio.Lock()
-    pending: dict[str, asyncio.Future] = {}  # qid -> future awaiting a Slack reply
-    qcounter: int = 0
-
-
-S = State()
-
-
-async def post(text: str, mention: bool = False) -> None:
-    """Post a message to the target channel, chunked to Slack's limit."""
-    prefix = f"{MENTION} " if mention else ""
-    body = prefix + text
-    for i in range(0, len(body), TELEGRAM_MAX):
-        await S.app.client.chat_postMessage(
-            channel=S.channel_id, text=body[i : i + TELEGRAM_MAX]
-        )
-
-
-async def teams_poll_loop() -> None:
-    """Background loop: every POLL_TIME_SPAN_MINUTES, poll Teams unreads and
-    announce new ones to Slack. Survives individual poll failures."""
-    interval = POLL_TIME_SPAN_MINUTES * 60
-    logger.info("Teams poll loop started (every %d min)", POLL_TIME_SPAN_MINUTES)
-    while True:
-        try:
-            await poll_teams_unreads(post)
-        except Exception as e:
-            logger.error("teams poll loop: %s", e)
-        await asyncio.sleep(interval)
-
-
-async def ask_user(body: str) -> str:
-    """Post a tagged question/approval to Slack and block until the user replies
-    to THAT tag. Multiple questions can be outstanding at once (concurrent
-    subagents); each gets its own [Qn] tag so replies are unambiguous."""
-    S.qcounter += 1
-    qid = f"Q{S.qcounter}"
-    loop = asyncio.get_running_loop()
-    fut = loop.create_future()
-    S.pending[qid] = fut
-    await post(f"*[{qid}]* {body}\n_reply `{qid} <answer>`_", mention=True)
-    try:
-        return await fut
-    finally:
-        S.pending.pop(qid, None)
-
-
-# --------------------------------------------------------------------------- #
-# Permission + elicitation callback (the interactive rail).
-# --------------------------------------------------------------------------- #
-async def can_use_tool(tool_name, input_data, context):
-    # Elicitation: the model wants to ask the user something.
-    if tool_name == "AskUserQuestion":
-        questions = input_data.get("questions", [])
-        answers: dict[str, str] = {}
-        for q in questions:
-            lines = [f"*{q.get('header','?')}* — {q.get('question','')}"]
-            opts = q.get("options", [])
-            for idx, opt in enumerate(opts, 1):
-                lines.append(f"  {idx}. {opt.get('label','')} — {opt.get('description','')}")
-            lines.append("_reply with a number, or free text_")
-            reply = (await ask_user("\n".join(lines))).strip()
-            chosen = reply
-            if reply.isdigit() and 1 <= int(reply) <= len(opts):
-                chosen = opts[int(reply) - 1].get("label", reply)
-            answers[q.get("question", "")] = chosen
-        return PermissionResultAllow(
-            updated_input={"questions": questions, "answers": answers}
-        )
-
-    # Autonomous by default: allow anything not on the guard list.
-    if not is_guarded(tool_name, input_data):
-        return PermissionResultAllow(updated_input=input_data)
-
-    # Guarded action: ask for yes/no approval, with the actual command as context.
-    desc = (
-        input_data.get("command")
-        if tool_name in ("Bash", "PowerShell")
-        else str(input_data)[:300]
-    )
-    reply = (
-        await ask_user(f":lock: guarded `{tool_name}`\n```{desc}```\napprove? (yes/no)")
-    ).strip().lower()
-    if reply in ("y", "yes", "ok", "approve", "si", "sí", "dale"):
-        return PermissionResultAllow(updated_input=input_data)
-    return PermissionResultDeny(message=f"User denied: {reply!r}")
-
-
-# --------------------------------------------------------------------------- #
-# Query processing.
-# --------------------------------------------------------------------------- #
-async def handle_query(text: str) -> None:
-    async with S.query_lock:
-        await post("🧠 …", mention=False)
-        await S.client.query(text)
-        parts: list[str] = []
-        async for msg in S.client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock) and block.text.strip():
-                        parts.append(block.text)
-            elif isinstance(msg, ResultMessage):
-                break
-        answer = "\n\n".join(parts).strip() or "[no text output]"
-        await post(answer, mention=True)
-
-
-# --------------------------------------------------------------------------- #
-# Slack wiring.
-# --------------------------------------------------------------------------- #
-async def on_message(event, logger):
-    if event.get("bot_id") or event.get("subtype"):
-        return
-    if event.get("channel") != S.channel_id:
-        return
-    # Hardcoded safeguard: obey only the owner (mati.ratcliffe).
-    if event.get("user") != OWNER_USER:
-        return
-
-    text = strip_footer((event.get("text") or "").strip())
-    if not text:
-        return
-
-    # If questions are open, route this message to one of them.
-    if S.pending:
-        m = re.match(r"^\s*(Q\d+)\b[:\s]*(.*)$", text, re.IGNORECASE | re.DOTALL)
-        if m and m.group(1).upper() in S.pending:
-            S.pending[m.group(1).upper()].set_result(m.group(2).strip())
-            return
-        if len(S.pending) == 1:  # single open question -> bare reply answers it
-            next(iter(S.pending.values())).set_result(text)
-            return
-        await post(
-            "Open questions: "
-            + ", ".join(sorted(S.pending))
-            + " — reply with the tag, e.g. `Q1 yes`.",
-            mention=True,
-        )
-        return
-
-    logger.info("query: %s", text[:120])
-    asyncio.create_task(handle_query(text))
 
 
 async def main() -> None:
-    bot_token = os.environ.get("SLACK_BOT_TOKEN")
-    app_token = os.environ.get("SLACK_APP_TOKEN")
-    if not bot_token or not app_token:
+    if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
         raise SystemExit("Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN (see .env.example).")
 
-    S.app = AsyncApp(token=bot_token)
-    S.app.event("message")(on_message)
-
-    # Resolve target channel -> id (bot must be a member).
-    resp = await S.app.client.users_conversations(types="public_channel", limit=200)
-    for ch in resp["channels"]:
-        if ch["name"] == TARGET_CHANNEL:
-            S.channel_id = ch["id"]
-            break
-    if not S.channel_id:
+    app = AsyncApp(token=SLACK_BOT_TOKEN)
+    channel_id = await resolve_channel_id(app.client)
+    if not channel_id:
         raise SystemExit(f"Channel '{TARGET_CHANNEL}' not found among bot's channels.")
+
+    poster = Poster(app.client, channel_id)
+    queue = QuestionQueue(poster.post)
 
     options = ClaudeAgentOptions(
         # Full Claude Code system prompt + our orchestrator note appended.
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": SYSTEM_PROMPT,
-        },
-        # Inherit ALL of the user's ~/.claude context: settings, hooks,
-        # CLAUDE.md, permissions, plus project/local for the working repo.
+        system_prompt={"type": "preset", "preset": "claude_code", "append": SYSTEM_PROMPT},
+        # Inherit ALL of the user's ~/.claude context: settings, hooks, CLAUDE.md,
+        # permissions, skills, plus project/local for the working repo.
         setting_sources=["user", "project", "local"],
         skills="all",
-        # "default" (NOT bypassPermissions) so can_use_tool is actually consulted
-        # for every tool call. The callback auto-allows everything except the
-        # guarded few, which it routes to Slack for approval. bypassPermissions
-        # would shadow the callback entirely (SDK warns about this).
+        # "default" (NOT bypassPermissions) so can_use_tool is actually consulted.
         permission_mode="default",
-        can_use_tool=can_use_tool,
+        can_use_tool=make_can_use_tool(queue),
         cwd=resolve_cwd(),
         **session_kwargs(),
     )
-    logger.info(
-        "Orchestrator working dir: %s | session: %s",
-        options.cwd,
-        ORCH_SESSION_ID,
-    )
+    logger.info("Working dir: %s | session: %s", options.cwd, ORCH_SESSION_ID)
 
-    logger.info("Orchestrator connecting Claude session…")
     async with ClaudeSDKClient(options=options) as client:
-        S.client = client
+        lock = asyncio.Lock()
+
+        async def handle_query(text: str) -> None:
+            async with lock:  # single serial session
+                await poster.post("🧠 …")
+                await client.query(text)
+                parts: list[str] = []
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, TextBlock) and block.text.strip():
+                                parts.append(block.text)
+                    elif isinstance(msg, ResultMessage):
+                        break
+                await poster.post("\n\n".join(parts).strip() or "[no text output]", mention=True)
+
+        async def on_message(event, logger) -> None:
+            if event.get("bot_id") or event.get("subtype"):
+                return
+            if event.get("channel") != channel_id:
+                return
+            if event.get("user") != OWNER_USER:  # obey only the owner
+                return
+            text = strip_footer((event.get("text") or "").strip())
+            if not text:
+                return
+            if await queue.route(text):  # an answer to an open question
+                return
+            logger.info("query: %s", text[:120])
+            asyncio.create_task(handle_query(text))
+
+        app.event("message")(on_message)
+
+        async def teams_poll_loop() -> None:
+            interval = POLL_TIME_SPAN_MINUTES * 60
+            logger.info("Teams poll loop started (every %d min)", POLL_TIME_SPAN_MINUTES)
+            while True:
+                try:
+                    await poll_teams_unreads(poster.post)
+                except Exception as e:
+                    logger.error("teams poll loop: %s", e)
+                await asyncio.sleep(interval)
+
         asyncio.create_task(teams_poll_loop())
-        handler = AsyncSocketModeHandler(S.app, app_token)
-        logger.info("Listening on #%s (%s)", TARGET_CHANNEL, S.channel_id)
-        await handler.start_async()
+
+        logger.info("Listening on #%s (%s)", TARGET_CHANNEL, channel_id)
+        await AsyncSocketModeHandler(app, SLACK_APP_TOKEN).start_async()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
+    )
     asyncio.run(main())

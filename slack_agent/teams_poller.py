@@ -5,8 +5,8 @@ the Slack channel, tagging the owner. The dedupe store (`teams_seen`) is an
 in-memory list that starts empty and grows over the process lifetime, so each
 unread is announced only once.
 
-The poll logic takes an injected `post` coroutine so the orchestrator can reuse
-it with its own Slack client. Run this module directly to fire a single poll:
+`poll_teams_unreads(post)` takes an injected `post` coroutine so the orchestrator
+can reuse it with its own client. Run this module directly to fire one poll:
 
     .venv/Scripts/python.exe -m slack_agent.teams_poller
 """
@@ -16,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from pathlib import Path
 
 # Corp TLS interception: trust the Windows cert store for all HTTPS. First.
 import truststore
@@ -26,29 +24,10 @@ truststore.inject_into_ssl()
 
 from slack_sdk.web.async_client import AsyncWebClient
 
-
-def _load_dotenv() -> None:
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
-
-
-_load_dotenv()
+from .config import SLACK_BOT_TOKEN, TARGET_CHANNEL, TEAMS_CMD
+from .slack_io import Poster, resolve_channel_id
 
 logger = logging.getLogger("teams_poller")
-
-POLL_TIME_SPAN_MINUTES = int(os.environ.get("POLL_TIME_SPAN_MINUTES", "10"))
-TEAMS_CMD = os.environ.get("TEAMS_CMD", "teams")  # `teams` CLI on PATH
-TARGET_CHANNEL = os.environ.get("SLACK_CHANNEL", "general-personal")
-OWNER_USER = "U0BLY0DHJF8"  # mati.ratcliffe
-MENTION = f"<@{OWNER_USER}>"
-_SLACK_MAX = 4096
 
 # In-memory record of unread elements already announced. Starts empty.
 teams_seen: list = []
@@ -108,24 +87,13 @@ async def poll_teams_unreads(post) -> list:
 
 async def _run_once() -> None:
     """Standalone: connect a Slack web client, resolve the channel, poll once."""
-    token = os.environ.get("SLACK_BOT_TOKEN")
-    if not token:
+    if not SLACK_BOT_TOKEN:
         raise SystemExit("Set SLACK_BOT_TOKEN (see .env.example).")
-    client = AsyncWebClient(token=token)
-
-    resp = await client.users_conversations(types="public_channel", limit=200)
-    channel_id = next(
-        (c["id"] for c in resp["channels"] if c["name"] == TARGET_CHANNEL), None
-    )
+    client = AsyncWebClient(token=SLACK_BOT_TOKEN)
+    channel_id = await resolve_channel_id(client)
     if not channel_id:
         raise SystemExit(f"Channel '{TARGET_CHANNEL}' not found among bot's channels.")
-
-    async def post(text: str, mention: bool = False) -> None:
-        body = (f"{MENTION} " if mention else "") + text
-        for i in range(0, len(body), _SLACK_MAX):
-            await client.chat_postMessage(channel=channel_id, text=body[i : i + _SLACK_MAX])
-
-    new = await poll_teams_unreads(post)
+    new = await poll_teams_unreads(Poster(client, channel_id).post)
     logger.info("poll-once done: %d new, %d seen total", len(new), len(teams_seen))
 
 

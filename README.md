@@ -1,47 +1,71 @@
 # slack-agent
 
-Minimal Slack bot that relays your DMs to Claude Code (`claude -p`) and replies.
-Uses **Socket Mode** (outbound WebSocket) so it works behind a corp firewall with
-no public URL. Currently in **dummy mode**: echoes your message uppercased.
+A Slack-driven Claude **orchestrator**: a persistent Claude Agent SDK session you
+talk to through a Slack relay (from your phone/browser). It runs autonomously,
+dispatches its own subagents, and only pauses for you on guarded actions or
+clarifying questions — which round-trip to Slack as tagged questions. A
+background loop also announces new Microsoft Teams unreads to the same channel.
 
-You chat from Slack on your phone/browser — nothing but the Python lib runs here.
+Uses **Socket Mode** (outbound WebSocket), so it works behind a corporate
+firewall with no public URL.
 
-## One-time Slack app setup (in a browser)
+## Module layout
 
-Use a **personal free workspace** (slack.com/create) to avoid corp admin gates.
+```
+slack_agent/
+  config.py        loads .env once; all settings + session/cwd resolution
+  slack_io.py      channel resolution, chunked Poster, input footer stripping
+  interaction.py   QuestionQueue — concurrent-safe [Qn]-tagged operator prompts
+  permissions.py   can_use_tool policy: autonomous unless a command is guarded
+  teams_poller.py  poll_teams_unreads(post) + standalone one-shot entrypoint
+  orchestrator.py  wiring: Claude session + Slack handler + Teams poll loop
+```
 
-1. Go to https://api.slack.com/apps -> **Create New App** -> **From scratch**.
-   Pick a name + your workspace.
-2. **Socket Mode** (left nav) -> toggle **Enable Socket Mode** on. It prompts to
-   create an **App-Level Token** with `connections:write` -> create it, copy the
-   `xapp-...` token = `SLACK_APP_TOKEN`.
-3. **OAuth & Permissions** -> **Bot Token Scopes** -> add: `chat:write`,
-   `im:history`, `im:read`.
-4. **Event Subscriptions** -> toggle **Enable Events** on -> **Subscribe to bot
-   events** -> add `message.im` -> Save.
-5. **App Home** -> Show Tabs -> enable **Messages Tab**, and check
-   "Allow users to send Slash commands and messages from the messages tab".
-6. **Install App** (left nav) -> Install to workspace -> copy the
-   **Bot User OAuth Token** `xoxb-...` = `SLACK_BOT_TOKEN`.
+## Setup (one time, in a browser)
 
-## Configure
+Use a personal free Slack workspace. Create an app at https://api.slack.com/apps
+(From scratch), then:
 
-Copy `.env.example` to `.env` and fill in both tokens. (The bot reads env vars,
-not `.env` directly -- export them, or set inline when running.)
+1. **Socket Mode** → enable. **Basic Information → App-Level Tokens** → generate
+   one with `connections:write` → copy the `xapp-...` token.
+2. **OAuth & Permissions → Bot Token Scopes**: `chat:write`, `channels:read`,
+   `channels:history` (add `im:history`/`im:read` if you also want DMs).
+3. **Event Subscriptions** → enable → subscribe to bot event `message.channels`.
+4. **Install App** → copy the Bot User OAuth Token `xoxb-...`.
+5. Invite the bot to your channel: `/invite @<botname>`.
+
+Copy `.env.example` to `.env` and fill in both tokens (the app reads `.env`).
 
 ## Run
 
+Orchestrator (main):
+
 ```bash
-.venv/Scripts/python.exe -m slack_agent.bot
+.venv/Scripts/python.exe -m slack_agent.orchestrator
 ```
 
-Then in Slack, open a DM with your bot (find it under Apps) and send a message.
+Fire a single Teams poll (standalone, for testing):
+
+```bash
+.venv/Scripts/python.exe -m slack_agent.teams_poller
+```
 
 ## How it works
 
 ```
-Slack DM -> Socket Mode WS -> bot.py -> claude -p (dummy: uppercase) -> reply
+Slack msg ─► orchestrator ─► Claude session (dispatches subagents)
+   ◄── reply ────────────────┘
+   guarded action / clarifying question ─► [Qn] prompt ◄── your tagged reply
+Teams unreads ─(every POLL_TIME_SPAN_MINUTES)─► announced to the channel
 ```
 
-Requires the `claude` CLI on PATH and authenticated (for real mode). Override
-with `CLAUDE_BIN` / `CLAUDE_TIMEOUT`. Restrict access with `SLACK_ALLOWED_USERS`.
+- **Owner lock**: only the configured `OWNER_USER` is obeyed.
+- **Autonomous unless guarded**: `permission_mode="default"` + a `can_use_tool`
+  policy that allows everything except `config.GUARD_PATTERNS`
+  (`git push`, `rm -rf`, `git reset --hard`, `--force`), which ask for approval.
+- **Concurrent-safe questions**: each prompt is tagged `[Q1]`, `[Q2]`, …; reply
+  `Q1 yes`. A bare reply works when only one is open.
+- **Session**: a fixed `ORCH_SESSION_ID` is resumed each start (persistent memory
+  + appears in the desktop GUI recents).
+
+Requires the `claude` CLI authenticated, and the `teams` CLI on PATH for polling.
