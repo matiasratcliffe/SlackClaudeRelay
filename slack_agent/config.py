@@ -63,6 +63,15 @@ GUARD_PATTERNS = [
 ]
 
 # --- Teams poller ---------------------------------------------------------- #
+# Master switch for the background Teams poll loop. Default ON; set to any of
+# 0/false/no/off to disable.
+TEAMS_POLL_ENABLED = os.environ.get("TEAMS_POLL_ENABLED", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+    "",
+)
 POLL_TIME_SPAN_MINUTES = int(os.environ.get("POLL_TIME_SPAN_MINUTES", "10"))
 TEAMS_CMD = os.environ.get("TEAMS_CMD", "teams")  # `teams` CLI on PATH
 

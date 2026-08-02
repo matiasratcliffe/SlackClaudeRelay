@@ -44,6 +44,7 @@ from .config import (
     SLACK_BOT_TOKEN,
     SYSTEM_PROMPT,
     TARGET_CHANNEL,
+    TEAMS_POLL_ENABLED,
     resolve_cwd,
     session_kwargs,
 )
@@ -126,7 +127,10 @@ async def main() -> None:
                     logger.error("teams poll loop: %s", e)
                 await asyncio.sleep(interval)
 
-        asyncio.create_task(teams_poll_loop())
+        if TEAMS_POLL_ENABLED:
+            asyncio.create_task(teams_poll_loop())
+        else:
+            logger.info("Teams poll loop disabled (TEAMS_POLL_ENABLED)")
 
         logger.info("Listening on #%s (%s)", TARGET_CHANNEL, channel_id)
         await AsyncSocketModeHandler(app, SLACK_APP_TOKEN).start_async()
