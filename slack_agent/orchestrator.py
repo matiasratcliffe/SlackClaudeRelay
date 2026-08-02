@@ -19,6 +19,7 @@ Run:  .venv/Scripts/python.exe -m slack_agent.orchestrator
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -100,6 +101,16 @@ SYSTEM_PROMPT = (
 
 def strip_footer(text: str) -> str:
     return _FOOTER_RE.sub("", text).strip()
+
+
+def resolve_cwd(argv: list[str] | None = None) -> str:
+    """Working dir for the Orchestrator. Precedence: --cwd flag > ORCH_CWD env >
+    default ~/Repos."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--cwd", default=None)
+    args, _ = parser.parse_known_args(argv)
+    base = args.cwd or os.environ.get("ORCH_CWD") or str(Path.home() / "Repos")
+    return str(Path(base).expanduser())
 
 
 def is_guarded(tool_name: str, tool_input: dict) -> bool:
@@ -262,8 +273,9 @@ async def main() -> None:
         permission_mode="bypassPermissions",
         can_use_tool=can_use_tool,
         hooks={"PreToolUse": [HookMatcher(hooks=[pre_tool_guard])]},
-        cwd=os.environ.get("ORCH_CWD") or os.getcwd(),
+        cwd=resolve_cwd(),
     )
+    logger.info("Orchestrator working dir: %s", options.cwd)
 
     logger.info("Orchestrator connecting Claude session…")
     async with ClaudeSDKClient(options=options) as client:
