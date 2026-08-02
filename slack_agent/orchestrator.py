@@ -70,8 +70,11 @@ logger = logging.getLogger("orchestrator")
 TARGET_CHANNEL = os.environ.get("SLACK_CHANNEL", "general-personal")
 OWNER_USER = "U0BLY0DHJF8"  # mati.ratcliffe — the ONLY user the orchestrator obeys
 MENTION = f"<@{OWNER_USER}>"
-# Fixed session id -> persists across restarts + appears in Claude GUI recents.
-ORCH_SESSION_ID = os.environ.get("ORCH_SESSION_ID", "0c1e5d2a-0b17-4e57-9a11-0c1e5d2a0b17")
+# The desktop-app-created session the orchestrator drives (so it shows in the
+# GUI recents and updates live). Resumed on every start; override via env.
+ORCH_SESSION_ID = os.environ.get(
+    "ORCH_SESSION_ID", "d0617ad4-028b-49d1-90d0-ac22327d19f1"
+)
 TELEGRAM_MAX = 4096  # Slack single-message char cap is also 4096.
 
 # The ChatGPT Slack app appends "*Enviado usando* <@...>"; strip it off inputs.
