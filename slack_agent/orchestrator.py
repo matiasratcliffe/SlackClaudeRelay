@@ -50,6 +50,7 @@ from .config import (
 )
 from .interaction import QuestionQueue
 from .permissions import make_can_use_tool
+from .single_instance import acquire_single_instance
 from .slack_io import Poster, resolve_channel_id, strip_footer
 from .teams_poller import poll_teams_unreads, teams_preflight
 
@@ -57,6 +58,9 @@ logger = logging.getLogger("orchestrator")
 
 
 async def main() -> None:
+    # Refuse to start if another orchestrator is running. Held for process life.
+    _lock = acquire_single_instance()  # noqa: F841
+
     if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
         raise SystemExit("Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN (see .env.example).")
 

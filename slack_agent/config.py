@@ -45,6 +45,9 @@ ORCH_SESSION_ID = os.environ.get(
     "ORCH_SESSION_ID", "d0617ad4-028b-49d1-90d0-ac22327d19f1"
 )
 
+# Localhost port used as a single-instance lock (bind fails if one is running).
+ORCH_LOCK_PORT = int(os.environ.get("ORCH_LOCK_PORT", "47615"))
+
 SYSTEM_PROMPT = (
     "You are an orchestrator that the user drives through a Slack relay. Keep "
     "replies concise and self-contained (they are delivered as chat messages). "
