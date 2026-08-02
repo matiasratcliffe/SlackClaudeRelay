@@ -102,7 +102,9 @@ async def main() -> None:
                                 parts.append(block.text)
                     elif isinstance(msg, ResultMessage):
                         break
-                await poster.post("\n\n".join(parts).strip() or "[no text output]", mention=True)
+                answer = "\n\n".join(parts).strip() or "[no text output]"
+                logger.info("answer: %s", answer)
+                await poster.post(answer, mention=True)
 
         async def on_message(event, logger) -> None:
             if event.get("bot_id") or event.get("subtype"):
@@ -140,6 +142,7 @@ async def main() -> None:
             logger.info("Teams poller skipped (see warning above)")
 
         logger.info("Listening on #%s (%s)", TARGET_CHANNEL, channel_id)
+        logger.info("=== Claude orchestrator relay running ===")
         await AsyncSocketModeHandler(app, SLACK_APP_TOKEN).start_async()
 
 
