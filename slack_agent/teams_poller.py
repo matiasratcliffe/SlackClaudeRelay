@@ -1,9 +1,9 @@
 """Teams-unread -> Slack poller.
 
-Runs `teams unreads --json` and announces any unread element not seen before to
-the Slack channel, tagging the owner. The dedupe store (`teams_seen`) is an
-in-memory list that starts empty and grows over the process lifetime, so each
-unread is announced only once.
+Runs `teams unreads --json` and announces any unread element that appeared since
+the previous poll to the Slack channel, tagging the owner. The comparison is
+against `last_unreads` — a snapshot of the previous poll that is replaced every
+poll — so only genuine changes are announced and cleared unreads drop out.
 
 `poll_teams_unreads(post)` takes an injected `post` coroutine so the orchestrator
 can reuse it with its own client. Run this module directly to fire one poll:
@@ -29,8 +29,10 @@ from .slack_io import Poster, resolve_channel_id
 
 logger = logging.getLogger("teams_poller")
 
-# In-memory record of unread elements already announced. Starts empty.
-teams_seen: list = []
+# Snapshot of the PREVIOUS poll's unreads. Replaced every poll, so we only ever
+# compare against the last poll (orphans that cleared drop out; a chat that
+# clears then reappears re-announces). Starts empty.
+last_unreads: list = []
 
 
 async def _run_teams(subcmd: str) -> tuple[int, str]:
@@ -74,8 +76,9 @@ async def teams_preflight() -> bool:
 
 async def poll_teams_unreads(post) -> list:
     """One poll cycle: run `teams unreads --json`, and for every unread element
-    not already in `teams_seen`, call `post(text, mention=True)` (tagging the
-    owner). New elements are appended to `teams_seen`. Returns the new elements.
+    that wasn't in the previous poll's snapshot (`last_unreads`), call
+    `post(text, mention=True)` (tagging the owner). Then replace `last_unreads`
+    with the current unreads. Returns the newly-appeared elements.
 
     `post` is a coroutine: `async def post(text: str, mention: bool = False)`.
     Never raises — logs and returns [] on any failure so a caller's loop is safe.
@@ -108,9 +111,8 @@ async def poll_teams_unreads(post) -> list:
     if not isinstance(items, list):
         return []
 
-    new = [x for x in items if x not in teams_seen]
+    new = [x for x in items if x not in last_unreads]
     if new:
-        teams_seen.extend(new)
         lines = [f":envelope_with_arrow: *{len(new)}* new Teams unread(s):"]
         for it in new:
             if isinstance(it, dict):
@@ -121,6 +123,8 @@ async def poll_teams_unreads(post) -> list:
                 lines.append(f"• {it}")
         await post("\n".join(lines), mention=True)
         logger.info("teams poll: %d new unread(s) announced", len(new))
+    # Replace the snapshot with the current unreads (drops orphans, updates counts).
+    last_unreads[:] = items
     return new
 
 
@@ -133,7 +137,7 @@ async def _run_once() -> None:
     if not channel_id:
         raise SystemExit(f"Channel '{TARGET_CHANNEL}' not found among bot's channels.")
     new = await poll_teams_unreads(Poster(client, channel_id).post)
-    logger.info("poll-once done: %d new, %d seen total", len(new), len(teams_seen))
+    logger.info("poll-once done: %d new, %d currently unread", len(new), len(last_unreads))
 
 
 if __name__ == "__main__":
