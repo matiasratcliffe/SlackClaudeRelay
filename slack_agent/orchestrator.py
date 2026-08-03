@@ -1,16 +1,24 @@
-"""Slack-driven Claude orchestrator — persistent, streaming, single serial session.
+"""Slack-driven Claude orchestrator — persistent, full-duplex, single session.
 
 A long-lived Claude Agent SDK session the operator drives through a Slack relay.
 It runs autonomously; only guarded shell commands (config.GUARD_PATTERNS) and the
 model's clarifying questions pause and round-trip to Slack via the QuestionQueue.
 A background loop announces new Teams unreads to the same channel.
 
+Full duplex: input and output are decoupled. Every Slack message is handed to
+Claude immediately (`session.send`), and a single always-on reader task drains
+`session.stream()` — posting EVERY completed turn to Slack the moment it ends,
+including proactive turns (a timer firing, a background task or sub-agent
+finishing) that no message triggered. Nothing is buffered waiting for the next
+message, so there is no reply offset.
+
 This module is just wiring — behavior lives in the focused modules it imports:
-  config        settings + session/cwd resolution
-  slack_io      channel resolution + chunked posting + input cleaning
-  interaction   the tagged question queue (approvals + elicitation plumbing)
-  permissions   the can_use_tool policy (autonomous-unless-guarded)
-  teams_poller  the Teams-unread poll
+  config          settings + session/cwd resolution
+  claude_session  the Claude Agent SDK session (options + send + stream)
+  slack_io        channel resolution + chunked posting + input cleaning
+  interaction     the tagged question queue (approvals + elicitation plumbing)
+  permissions     the can_use_tool policy (autonomous-unless-guarded)
+  teams_poller    the Teams-unread poll
 
 Run:  .venv/Scripts/python.exe -m slack_agent.orchestrator
 """
@@ -28,25 +36,14 @@ truststore.inject_into_ssl()
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    TextBlock,
-)
-
+from .claude_session import ClaudeSession
 from .config import (
-    ORCH_SESSION_ID,
     OWNER_USER,
     POLL_TIME_SPAN_MINUTES,
     SLACK_APP_TOKEN,
     SLACK_BOT_TOKEN,
-    SYSTEM_PROMPT,
     TARGET_CHANNEL,
     TEAMS_POLL_ENABLED,
-    resolve_cwd,
-    session_kwargs,
 )
 from .interaction import QuestionQueue
 from .permissions import make_can_use_tool
@@ -72,39 +69,19 @@ async def main() -> None:
     poster = Poster(app.client, channel_id)
     queue = QuestionQueue(poster.post)
 
-    options = ClaudeAgentOptions(
-        # Full Claude Code system prompt + our orchestrator note appended.
-        system_prompt={"type": "preset", "preset": "claude_code", "append": SYSTEM_PROMPT},
-        # Inherit ALL of the user's ~/.claude context: settings, hooks, CLAUDE.md,
-        # permissions, skills, plus project/local for the working repo.
-        setting_sources=["user", "project", "local"],
-        skills="all",
-        # "default" (NOT bypassPermissions) so can_use_tool is actually consulted.
-        permission_mode="default",
-        can_use_tool=make_can_use_tool(queue),
-        cwd=resolve_cwd(),
-        **session_kwargs(),
-    )
-    logger.info("Working dir: %s | session: %s", options.cwd, ORCH_SESSION_ID)
+    async with ClaudeSession(make_can_use_tool(queue)) as session:
 
-    async with ClaudeSDKClient(options=options) as client:
-        lock = asyncio.Lock()
+        async def reader() -> None:
+            # The single always-on consumer of Claude's output. Posts each
+            # completed turn — user-triggered OR proactive — as it finishes.
+            try:
+                async for answer in session.stream():
+                    logger.info("answer: %s", answer)
+                    await poster.post(answer, mention=True)
+            except Exception:
+                logger.exception("reader loop crashed")
 
-        async def handle_query(text: str) -> None:
-            async with lock:  # single serial session
-                await poster.post("🧠 …")
-                await client.query(text)
-                parts: list[str] = []
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock) and block.text.strip():
-                                parts.append(block.text)
-                    elif isinstance(msg, ResultMessage):
-                        break
-                answer = "\n\n".join(parts).strip() or "[no text output]"
-                logger.info("answer: %s", answer)
-                await poster.post(answer, mention=True)
+        asyncio.create_task(reader())
 
         async def on_message(event, logger) -> None:
             if event.get("bot_id") or event.get("subtype"):
@@ -119,7 +96,9 @@ async def main() -> None:
             if await queue.route(text):  # an answer to an open question
                 return
             logger.info("query: %s", text[:120])
-            asyncio.create_task(handle_query(text))
+            await poster.post("🧠 …")
+            # Fire-and-forget: the reply comes back through the reader, not here.
+            await session.send(text)
 
         app.event("message")(on_message)
 
@@ -142,7 +121,10 @@ async def main() -> None:
             logger.info("Teams poller skipped (see warning above)")
 
         logger.info("Listening on #%s (%s)", TARGET_CHANNEL, channel_id)
-        logger.info("=== Claude orchestrator relay running ===")
+        logger.info("=== Claude orchestrator relay running (full duplex) ===")
+        # Announce readiness on the channel too (not just the log), so the
+        # operator knows the relay is live — especially after a restart.
+        await poster.post("✅ Orchestrator ready — full-duplex relay online.")
         await AsyncSocketModeHandler(app, SLACK_APP_TOKEN).start_async()
 
 
