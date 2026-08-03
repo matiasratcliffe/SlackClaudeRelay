@@ -56,14 +56,9 @@ SYSTEM_PROMPT = (
 )
 
 # --- Guarded actions ------------------------------------------------------- #
-# Shell commands (via the Bash OR PowerShell tool) that must pause for Slack
-# approval. Everything else runs autonomously. Edit to widen/narrow the gate.
-GUARD_PATTERNS = [
-    re.compile(r"\bgit\s+push\b"),
-    re.compile(r"\bgit\s+reset\s+--hard\b"),
-    re.compile(r"\brm\s+-rf\b"),
-    re.compile(r"--force\b|\s-f\b"),
-]
+# What pauses for Slack approval is defined by `permissions.ask` in settings.json
+# (the single source of truth), read + matched in permissions.py — plus a small
+# always-on safety floor for `teams write`. Nothing to configure here.
 
 # --- Teams poller ---------------------------------------------------------- #
 # Master switch for the background Teams poll loop. Default ON; set to any of
