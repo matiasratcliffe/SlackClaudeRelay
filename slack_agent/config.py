@@ -70,7 +70,7 @@ TEAMS_POLL_ENABLED = os.environ.get("TEAMS_POLL_ENABLED", "1").strip().lower() n
     "off",
     "",
 )
-POLL_TIME_SPAN_MINUTES = int(os.environ.get("POLL_TIME_SPAN_MINUTES", "10"))
+POLL_TIME_SPAN_MINUTES = int(os.environ.get("POLL_TIME_SPAN_MINUTES", "5"))
 TEAMS_CMD = os.environ.get("TEAMS_CMD", "teams")  # `teams` CLI on PATH
 
 
