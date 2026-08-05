@@ -24,7 +24,7 @@ truststore.inject_into_ssl()
 
 from slack_sdk.web.async_client import AsyncWebClient
 
-from .config import SLACK_BOT_TOKEN, TARGET_CHANNEL, TEAMS_CMD
+from .config import ANNOUNCE_MODE, SLACK_BOT_TOKEN, TARGET_CHANNEL, TEAMS_CMD
 from .slack_io import Poster, resolve_channel_id
 
 logger = logging.getLogger("teams_poller")
@@ -33,6 +33,17 @@ logger = logging.getLogger("teams_poller")
 # compare against the last poll (orphans that cleared drop out; a chat that
 # clears then reappears re-announces). Starts empty.
 last_unreads: list = []
+
+
+def _filter_for_mode(items: list) -> list:
+    """Restrict which newly-appeared unreads get announced to Slack, per ANNOUNCE_MODE:
+    ALL = everything, DM = only direct-message unreads, NONE = nothing. The snapshot still
+    tracks ALL unreads regardless — this only gates what gets posted."""
+    if ANNOUNCE_MODE == "NONE":
+        return []
+    if ANNOUNCE_MODE == "DM":
+        return [x for x in items if isinstance(x, dict) and x.get("type") == "dm"]
+    return list(items)
 
 
 async def _run_teams(subcmd: str) -> tuple[int, str]:
@@ -112,9 +123,10 @@ async def poll_teams_unreads(post) -> list:
         return []
 
     new = [x for x in items if x not in last_unreads]
-    if new:
-        lines = [f":envelope_with_arrow: *{len(new)}* new Teams unread(s):"]
-        for it in new:
+    announce = _filter_for_mode(new)
+    if announce:
+        lines = [f":envelope_with_arrow: *{len(announce)}* new Teams unread(s):"]
+        for it in announce:
             if isinstance(it, dict):
                 name = it.get("name", "?")
                 cnt = it.get("count", "")
@@ -122,7 +134,8 @@ async def poll_teams_unreads(post) -> list:
             else:
                 lines.append(f"• {it}")
         await post("\n".join(lines), mention=True)
-        logger.info("teams poll: %d new unread(s) announced", len(new))
+        logger.info("teams poll: announced %d/%d new unread(s) (mode=%s)",
+                    len(announce), len(new), ANNOUNCE_MODE)
     # Replace the snapshot with the current unreads (drops orphans, updates counts).
     last_unreads[:] = items
     return new

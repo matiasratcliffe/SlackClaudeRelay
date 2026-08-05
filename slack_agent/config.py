@@ -73,6 +73,13 @@ TEAMS_POLL_ENABLED = os.environ.get("TEAMS_POLL_ENABLED", "1").strip().lower() n
 POLL_TIME_SPAN_MINUTES = int(os.environ.get("POLL_TIME_SPAN_MINUTES", "5"))
 TEAMS_CMD = os.environ.get("TEAMS_CMD", "teams")  # `teams` CLI on PATH
 
+# Which Teams unreads the poller announces to Slack: ALL (every unread) | DM (only
+# direct-message unreads) | NONE (announce nothing). Default DM. The poll snapshot
+# still tracks ALL unreads regardless — this only gates what gets posted.
+ANNOUNCE_MODE = os.environ.get("TEAMS_ANNOUNCE_MODE", "DM").strip().upper()
+if ANNOUNCE_MODE not in ("ALL", "DM", "NONE"):
+    ANNOUNCE_MODE = "DM"
+
 
 def resolve_cwd(argv: list[str] | None = None) -> str:
     """Orchestrator working dir. Precedence: --cwd flag > ORCH_CWD env > ~/Repos."""
