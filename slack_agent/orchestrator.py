@@ -26,7 +26,10 @@ Run:  .venv/Scripts/python.exe -m slack_agent.orchestrator
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from pathlib import Path
 
 # Corp TLS interception: trust the Windows cert store for all HTTPS. First.
 import truststore
@@ -38,6 +41,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .claude_session import ClaudeSession
 from .config import (
+    ANNOUNCE_MODE,
     OWNER_USER,
     POLL_TIME_SPAN_MINUTES,
     SLACK_APP_TOKEN,
@@ -52,6 +56,22 @@ from .slack_io import Poster, resolve_channel_id, strip_footer
 from .teams_poller import poll_teams_unreads, teams_preflight
 
 logger = logging.getLogger("orchestrator")
+
+
+def _current_model() -> str:
+    """Best-effort model label for the ready banner: env, else settings.json, else 'default'."""
+    m = os.environ.get("ANTHROPIC_MODEL")
+    if m:
+        return m
+    try:
+        v = json.loads(
+            (Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8-sig")
+        ).get("model")
+        if v:
+            return v
+    except (OSError, ValueError):
+        pass
+    return "default"
 
 
 async def main() -> None:
@@ -124,7 +144,11 @@ async def main() -> None:
         logger.info("=== Claude orchestrator relay running (full duplex) ===")
         # Announce readiness on the channel too (not just the log), so the
         # operator knows the relay is live — especially after a restart.
-        await poster.post("✅ Orchestrator ready — full-duplex relay online.")
+        await poster.post(
+            "✅ Orchestrator ready — full-duplex relay online.\n"
+            f"• model: {_current_model()}\n"
+            f"• Teams notifications: {ANNOUNCE_MODE} · poll every {POLL_TIME_SPAN_MINUTES}m"
+        )
         await AsyncSocketModeHandler(app, SLACK_APP_TOKEN).start_async()
 
 
