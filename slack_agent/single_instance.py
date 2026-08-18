@@ -22,7 +22,11 @@ def acquire_single_instance() -> socket.socket:
     """Return the bound lock socket, or exit if another instance holds it.
     Keep the returned socket referenced for the whole process lifetime."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Deliberately NOT SO_REUSEADDR: we want the second bind to fail.
+    # Reserve the port exclusively so no later socket can share it and the
+    # second bind fails hard; on Windows a plain bind is shareable via
+    # SO_REUSEADDR, SO_EXCLUSIVEADDRUSE closes that hole.
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
     try:
         sock.bind((_LOCK_HOST, ORCH_LOCK_PORT))
         sock.listen(1)
