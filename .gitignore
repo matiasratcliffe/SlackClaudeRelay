@@ -3,5 +3,5 @@ __pycache__/
 *.pyc
 .env
 
-# research_bot runtime data (reports + explored-topics list) — not source
-research_output/
+# research_bot run logs — stdout noise; the reports/transcripts/explored list ARE committed
+research_output/_run*.log
