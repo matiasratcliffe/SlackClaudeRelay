@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ..embeddings import cosine
-from ..model import Node, NodeType, SecondaryEdge
+from ..model import MountLink, Node, NodeType, SecondaryEdge
 from .base import StorageBackend
 
 _cp = copy.deepcopy
@@ -30,6 +30,7 @@ class MemoryStore(StorageBackend):
     def __init__(self) -> None:
         self._nodes: dict[str, Node] = {}
         self._edges: dict[str, SecondaryEdge] = {}
+        self._mounts: dict[str, MountLink] = {}
         self._children: dict[str, set[str]] = {}
         self._lock = threading.RLock()
 
@@ -106,6 +107,23 @@ class MemoryStore(StorageBackend):
         with self._lock:
             return [_cp(e) for e in self._edges.values() if e.is_current]
 
+    # --- mounts ---
+    def put_mount(self, mount: MountLink) -> None:
+        with self._lock:
+            self._mounts[mount.id] = _cp(mount)
+
+    def delete_mount(self, mount_id: str) -> None:
+        with self._lock:
+            self._mounts.pop(mount_id, None)
+
+    def mounts_of(self, host_id: str) -> list[MountLink]:
+        with self._lock:
+            return [_cp(m) for m in self._mounts.values() if m.host_id == host_id]
+
+    def mounted_at(self, node_id: str) -> list[MountLink]:
+        with self._lock:
+            return [_cp(m) for m in self._mounts.values() if m.node_id == node_id]
+
     # --- versioned update (mutates the stored object in place; callers hold copies) ---
     def cas_update(self, kind, obj_id, expected_version, changes):
         with self._lock:
@@ -137,6 +155,7 @@ class MemoryStore(StorageBackend):
             data = {
                 "nodes": [{**asdict(n), "type": n.type.value} for n in self._nodes.values()],
                 "edges": [asdict(e) for e in self._edges.values()],
+                "mounts": [asdict(m) for m in self._mounts.values()],
             }
         Path(path).write_text(json.dumps(data), encoding="utf-8")
 
@@ -153,4 +172,6 @@ class MemoryStore(StorageBackend):
             store.put_node(Node(**d))
         for d in data.get("edges", []):
             store.put_edge(SecondaryEdge(**d))
+        for d in data.get("mounts", []):
+            store.put_mount(MountLink(**d))
         return store

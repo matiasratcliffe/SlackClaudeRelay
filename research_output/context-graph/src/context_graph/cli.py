@@ -17,6 +17,7 @@ from .graph import ContextGraph
 from .model import NodeType
 from .sample import build_sample
 from .store.memory_store import MemoryStore
+from .structure import deploy_structure
 
 
 def _build_graph(args) -> ContextGraph:
@@ -51,9 +52,18 @@ def _emit(obj, as_json: bool) -> None:
 
 def cmd_init(args):
     g = _build_graph(args)
-    g.ensure_root()
+    created = deploy_structure(g, args.structure)
     _persist(args, g)
-    _emit(f"initialized ({args.backend}); nodes={len(list(g.store.all_nodes()))}", args.json)
+    _emit({"structure": args.structure, "created": created} if args.json else
+          f"initialized ({args.backend}, structure={args.structure}); "
+          f"nodes={len(list(g.store.all_nodes()))}", args.json)
+
+
+def cmd_mount(args):
+    g = _build_graph(args)
+    m = g.mount(args.host, args.node, label=args.label)
+    _persist(args, g)
+    _emit({"id": m.id} if args.json else f"mounted {args.node} under {args.host} ({m.id})", args.json)
 
 
 def cmd_add_node(args):
@@ -128,7 +138,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init").set_defaults(func=cmd_init)
+    ini = sub.add_parser("init"); ini.set_defaults(func=cmd_init)
+    ini.add_argument("--structure", choices=["free", "opinionated"], default="free",
+                     help="free = bare root; opinionated = deploy the fixed macro-node taxonomy")
+
+    mo = sub.add_parser("mount"); mo.set_defaults(func=cmd_mount)
+    mo.add_argument("host"); mo.add_argument("node"); mo.add_argument("--label")
 
     a = sub.add_parser("add-node"); a.set_defaults(func=cmd_add_node)
     a.add_argument("title"); a.add_argument("--type", default="note",

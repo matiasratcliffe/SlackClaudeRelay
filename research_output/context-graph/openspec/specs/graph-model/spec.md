@@ -35,7 +35,9 @@ tree.
 ### Requirement: Secondary edge
 The system SHALL represent any-to-any relationships as first-class secondary edges with `id`,
 `source_id`, `target_id`, `directed` flag, optional `edge_embedding`, `verb_tags`, `weight`,
-`version`, and validity window (`valid_from`/`valid_to`).
+`version`, and validity window (`valid_from`/`valid_to`). As traversal wormholes, they SHALL also
+carry endpoint embedding `similarity`, ownership-tree `tree_distance` (both computed at link time),
+and an optional free-text `rationale`.
 
 #### Scenario: Link two arbitrary nodes
 - **WHEN** a secondary edge is created between two existing nodes in any subtrees
@@ -44,3 +46,22 @@ The system SHALL represent any-to-any relationships as first-class secondary edg
 #### Scenario: Meaning does not use the tree
 - **WHEN** a hierarchical-feeling relationship (e.g. task belongs to project) is recorded
 - **THEN** it is stored as a secondary edge, not as a parent change.
+
+#### Scenario: Wormhole context is captured
+- **WHEN** a secondary edge is created between two embedded nodes
+- **THEN** the edge stores their embedding similarity and their hop distance through the ownership
+  tree.
+
+### Requirement: Mount links
+The system SHALL support mount links that graft a node under an additional hierarchy host for
+navigation, WITHOUT changing the node's ownership parent or lock scope. Mounts SHALL be idempotent
+per (host, node); self-mounts and mounting under the node's own parent SHALL be rejected.
+
+#### Scenario: Teammate mounted under Team
+- **WHEN** a person owned by `social` is mounted under `work-team`
+- **THEN** traversal reaches the person from the work side, while their `parent_id` and lock
+  ancestry remain in `social`.
+
+#### Scenario: Duplicate mount collapses
+- **WHEN** the same (host, node) mount is requested twice
+- **THEN** the existing mount is returned and no duplicate is created.

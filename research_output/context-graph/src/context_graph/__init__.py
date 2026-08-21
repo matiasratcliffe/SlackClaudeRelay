@@ -5,15 +5,16 @@ from .embeddings import EmbeddingProvider, HashingEmbedder, cosine, find_entry_p
 from .export_obsidian import export_vault
 from .graph import Authority, ContextGraph
 from .locking import LockConflict, LockManager
-from .model import Node, NodeType, SecondaryEdge
+from .model import MountLink, Node, NodeType, SecondaryEdge
 from .sample import build_sample
 from .store.base import StorageBackend
 from .store.memory_store import MemoryStore
+from .structure import OPINIONATED_STRUCTURE, deploy_structure
 
 __all__ = [
-    "ContextGraph", "Authority", "Node", "SecondaryEdge", "NodeType",
+    "ContextGraph", "Authority", "Node", "SecondaryEdge", "MountLink", "NodeType",
     "StorageBackend", "MemoryStore", "EmbeddingProvider", "HashingEmbedder", "cosine",
     "find_entry_points", "assemble", "AssemblyResult", "LockManager", "LockConflict",
-    "export_vault", "build_sample",
+    "export_vault", "build_sample", "deploy_structure", "OPINIONATED_STRUCTURE",
 ]
 __version__ = "0.1.0"

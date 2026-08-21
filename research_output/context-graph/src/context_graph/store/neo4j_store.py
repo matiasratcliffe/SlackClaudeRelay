@@ -13,14 +13,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ..model import Node, NodeType, SecondaryEdge
+from ..model import MountLink, Node, NodeType, SecondaryEdge
 from .base import StorageBackend
 
 _NODE_PROPS = ("id", "type", "title", "body", "parent_id", "embedding", "tags", "owner_agent_id",
                "source", "authority", "summary", "version", "created_at", "updated_at")
 _EDGE_PROPS = ("id", "source_id", "target_id", "verb_tags", "directed", "edge_embedding", "weight",
-               "authority", "owner_agent_id", "source", "version", "valid_from", "valid_to",
-               "created_at")
+               "similarity", "tree_distance", "rationale", "authority", "owner_agent_id", "source",
+               "version", "valid_from", "valid_to", "created_at")
 
 
 class Neo4jStore(StorageBackend):
@@ -123,6 +123,31 @@ class Neo4jStore(StorageBackend):
     def current_edges(self):
         return [_to_edge(r["e"])
                 for r in self._run("MATCH (e:EdgeNode) WHERE e.valid_to IS NULL RETURN e")]
+
+    # --- mounts: (host)-[:MOUNTS {id, label, created_at}]->(node) ---
+    def put_mount(self, mount: MountLink) -> None:
+        self._run(
+            "MATCH (h:CtxNode {id:$hid}), (n:CtxNode {id:$nid}) "
+            "MERGE (h)-[m:MOUNTS {id:$id}]->(n) SET m.label=$label, m.created_at=$ts",
+            hid=mount.host_id, nid=mount.node_id, id=mount.id, label=mount.label,
+            ts=mount.created_at)
+
+    def delete_mount(self, mount_id: str) -> None:
+        self._run("MATCH ()-[m:MOUNTS {id:$id}]->() DELETE m", id=mount_id)
+
+    def mounts_of(self, host_id: str) -> list[MountLink]:
+        rows = self._run(
+            "MATCH (h:CtxNode {id:$hid})-[m:MOUNTS]->(n:CtxNode) "
+            "RETURN m.id AS id, m.label AS label, m.created_at AS ts, n.id AS nid", hid=host_id)
+        return [MountLink(host_id=host_id, node_id=r["nid"], id=r["id"], label=r["label"],
+                          created_at=r["ts"]) for r in rows]
+
+    def mounted_at(self, node_id: str) -> list[MountLink]:
+        rows = self._run(
+            "MATCH (h:CtxNode)-[m:MOUNTS]->(n:CtxNode {id:$nid}) "
+            "RETURN m.id AS id, m.label AS label, m.created_at AS ts, h.id AS hid", nid=node_id)
+        return [MountLink(host_id=r["hid"], node_id=node_id, id=r["id"], label=r["label"],
+                          created_at=r["ts"]) for r in rows]
 
     # --- versioned update ---
     def cas_update(self, kind, obj_id, expected_version, changes):

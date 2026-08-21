@@ -56,5 +56,12 @@ def export_vault(graph, out_dir: str | Path) -> Path:
                 tgt = store.get_node(e.target_id)
                 verb = "|".join(e.verb_tags) or "rel"
                 body.append(f"- [[{_slug(tgt.title) if tgt else e.target_id}]] ({verb})")
+        mounts = store.mounts_of(node.id)
+        if mounts:
+            body += ["", "## Mounted here"]
+            for m in mounts:
+                mn = store.get_node(m.node_id)
+                body.append(f"- [[{_slug(mn.title) if mn else m.node_id}]]"
+                            f"{f' ({m.label})' if m.label else ''}")
         (folder / f"{_slug(node.title)}-{node.id}.md").write_text("\n".join(body), encoding="utf-8")
     return out

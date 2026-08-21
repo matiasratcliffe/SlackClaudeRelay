@@ -21,6 +21,10 @@ def _neighbors(store, node_id: str, primary_weight: float) -> list[tuple[str, fl
     for e in store.edges_to(node_id):
         if not e.directed and e.source_id != node_id:   # undirected: also reachable backward
             out.append((e.source_id, e.weight, "|".join(e.verb_tags) or "rel"))
+    for m in store.mounts_of(node_id):                  # mounts are hierarchy: hop both ways
+        out.append((m.node_id, primary_weight, "mount"))
+    for m in store.mounted_at(node_id):
+        out.append((m.host_id, primary_weight, "mount"))
     return out
 
 

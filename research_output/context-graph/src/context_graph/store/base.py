@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
-from ..model import Node, SecondaryEdge
+from ..model import MountLink, Node, SecondaryEdge
 
 
 class StorageBackend(ABC):
@@ -63,6 +63,21 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def current_edges(self) -> list[SecondaryEdge]: ...
+
+    # --- mount links (navigation-only multi-parent; ownership unchanged) ---
+    @abstractmethod
+    def put_mount(self, mount: MountLink) -> None: ...
+
+    @abstractmethod
+    def delete_mount(self, mount_id: str) -> None: ...
+
+    @abstractmethod
+    def mounts_of(self, host_id: str) -> list[MountLink]:
+        """Mounts hosted under `host_id` (its grafted children)."""
+
+    @abstractmethod
+    def mounted_at(self, node_id: str) -> list[MountLink]:
+        """Mounts that graft `node_id` elsewhere (its extra hierarchy positions)."""
 
     # --- versioned update (optimistic concurrency) ---
     @abstractmethod

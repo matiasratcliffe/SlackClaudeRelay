@@ -13,7 +13,7 @@ from enum import IntEnum
 from .assembly import AssemblyResult, assemble
 from .embeddings import EmbeddingProvider, HashingEmbedder, cosine, find_entry_points
 from .locking import LockManager
-from .model import Node, NodeType, SecondaryEdge, ROOT_ID, validate_new_node
+from .model import MountLink, Node, NodeType, SecondaryEdge, ROOT_ID, validate_new_node
 from .store.base import StorageBackend
 from .store.memory_store import MemoryStore
 
@@ -57,10 +57,12 @@ class ContextGraph:
 
     # --- ingest ---
     def add_node(self, title, *, type=NodeType.NOTE, body="", parent_id=ROOT_ID,
-                 tags=None, authority=Authority.DIRECT_INFERENCE, source=None) -> Node:
+                 tags=None, authority=Authority.DIRECT_INFERENCE, source=None,
+                 node_id: str | None = None) -> Node:
         node = Node(title=title, type=type, body=body, parent_id=parent_id,
                     tags=list(tags or []), owner_agent_id=self.agent_id,
-                    authority=int(authority), source=source)
+                    authority=int(authority), source=source,
+                    **({"id": node_id} if node_id else {}))
         node.embedding = self.embedder.embed(f"{title}\n{body}")
         validate_new_node(node, lambda i: self.store.get_node(i) is not None)
         if parent_id:
@@ -72,7 +74,7 @@ class ContextGraph:
         return node
 
     def link(self, source_id, target_id, *, verb_tags=None, weight=1.0, directed=True,
-             authority=Authority.DIRECT_INFERENCE, source=None) -> SecondaryEdge:
+             authority=Authority.DIRECT_INFERENCE, source=None, rationale=None) -> SecondaryEdge:
         verbs = list(verb_tags or [])
         emb = self._embed_edge(source_id, target_id, verbs)
         existing = self._find_equivalent_edge(source_id, target_id, verbs, emb)
@@ -81,11 +83,54 @@ class ContextGraph:
                 "edge", existing.id, existing.version,
                 {"weight": existing.weight + weight, "valid_from": time.time()}))
             return self.store.get_edge(existing.id)
+        s, t = self.store.get_node(source_id), self.store.get_node(target_id)
+        sim = cosine(s.embedding, t.embedding) if s and t and s.embedding and t.embedding else None
         edge = SecondaryEdge(source_id=source_id, target_id=target_id, verb_tags=verbs,
                              directed=directed, weight=weight, edge_embedding=emb,
-                             authority=int(authority), owner_agent_id=self.agent_id, source=source)
+                             similarity=sim, tree_distance=self.tree_distance(source_id, target_id),
+                             rationale=rationale, authority=int(authority),
+                             owner_agent_id=self.agent_id, source=source)
         self.store.put_edge(edge)
         return edge
+
+    def mount(self, host_id: str, node_id: str, *, label: str | None = None) -> MountLink:
+        """Graft `node_id` under `host_id` for navigation, keeping ownership (and locks) unchanged.
+
+        Idempotent per (host, node); rejects self-mounts and mounting a node under its own
+        ownership parent (that's what parent_id already expresses).
+        """
+        if host_id == node_id:
+            raise ValueError("cannot mount a node into itself")
+        host, node = self.store.get_node(host_id), self.store.get_node(node_id)
+        if host is None or node is None:
+            raise ValueError("both host and node must exist")
+        if node.parent_id == host_id:
+            raise ValueError("node already owned by this host; a mount would be redundant")
+        for m in self.store.mounts_of(host_id):
+            if m.node_id == node_id:
+                return m
+        self.locks.acquire_write(self.agent_id, host_id)   # mounting edits the host's view
+        try:
+            mnt = MountLink(host_id=host_id, node_id=node_id, label=label)
+            self.store.put_mount(mnt)
+        finally:
+            self.locks.release_all(self.agent_id)
+        return mnt
+
+    def tree_distance(self, a_id: str, b_id: str) -> int | None:
+        """Hops between two nodes via the ownership tree (through their lowest common ancestor)."""
+        if a_id == b_id:
+            return 0
+        pa = self.store.ancestors(a_id) + [a_id]
+        pb = self.store.ancestors(b_id) + [b_id]
+        if not pa or not pb or pa[0] != pb[0]:
+            return None                                    # disconnected (shouldn't happen)
+        common = 0
+        for x, y in zip(pa, pb):
+            if x != y:
+                break
+            common += 1
+        return (len(pa) - common) + (len(pb) - common)
 
     def supersede(self, old_edge_id: str, **new_edge_kwargs) -> SecondaryEdge:
         """Close the old edge (valid_to=now) and append a replacement — non-destructive history."""

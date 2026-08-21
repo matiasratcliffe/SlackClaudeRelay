@@ -76,8 +76,11 @@ def _render(store, node_ids, scores, path) -> str:
             lines.append(n.body)
         out = store.edges_from(nid)
         if out:
-            links = ", ".join(f"[[{(store.get_node(e.target_id) or _Missing()).title}]]"
-                              f" ({'|'.join(e.verb_tags) or 'rel'})" for e in out)
+            # surface each wormhole's tree distance so the judgment layer can weigh the hop
+            links = ", ".join(
+                f"[[{(store.get_node(e.target_id) or _Missing()).title}]]"
+                f" ({'|'.join(e.verb_tags) or 'rel'}"
+                f"{f', d{e.tree_distance}' if e.tree_distance is not None else ''})" for e in out)
             lines.append(f"_links:_ {links}")
         lines.append("")
     return "\n".join(lines)

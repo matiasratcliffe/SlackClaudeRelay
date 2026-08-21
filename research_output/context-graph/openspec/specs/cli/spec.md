@@ -7,8 +7,9 @@ store + offline embeddings + a seeded sample graph).
 ## Requirements
 
 ### Requirement: Core commands
-The system SHALL provide `init`, `add-node`, `link`, `search`, `traverse`, `export`, `lock-status`,
-and `demo`, each with human-readable output and a `--json` option.
+The system SHALL provide `init` (with `--structure free|opinionated`), `add-node`, `link`, `mount`,
+`search`, `traverse`, `export`, `summarize`, `lock-status`, and `demo`, each with human-readable
+output and a `--json` option, plus `--db` persistence for the memory backend and `--agent` identity.
 
 #### Scenario: Search returns entry points
 - **WHEN** `search "<query>"` runs

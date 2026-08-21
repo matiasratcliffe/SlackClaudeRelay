@@ -56,7 +56,13 @@ class Node:
 
 @dataclass
 class SecondaryEdge:
-    """A directed-or-symmetric semantic relationship between any two nodes."""
+    """A directed-or-symmetric semantic relationship between any two nodes.
+
+    Secondary edges are traversal *wormholes* — their job is to justify hopping to an otherwise
+    unrelated part of the graph — so they carry more information than primary edges: endpoint
+    embedding `similarity`, ownership-tree `tree_distance` (a wormhole is worth more the farther
+    apart its endpoints sit in the hierarchy), and a free-text `rationale`.
+    """
 
     source_id: str
     target_id: str
@@ -65,6 +71,9 @@ class SecondaryEdge:
     id: str = field(default_factory=new_id)
     edge_embedding: list[float] | None = None
     weight: float = 1.0
+    similarity: float | None = None       # cosine of endpoint node embeddings at link time
+    tree_distance: int | None = None      # hops between endpoints via the ownership tree
+    rationale: str | None = None          # why this hop is useful (agent- or human-authored)
     authority: int = 0
     owner_agent_id: str | None = None
     source: str | None = None
@@ -76,6 +85,22 @@ class SecondaryEdge:
     @property
     def is_current(self) -> bool:
         return self.valid_to is None
+
+
+@dataclass
+class MountLink:
+    """Grafts a node into a second hierarchy position WITHOUT transferring ownership.
+
+    The filesystem-symlink analog: `node_id` keeps its single ownership parent (locks, authority),
+    but appears under `host_id` for navigation, traversal, and export. This is how e.g.
+    `work/team` primary-links teammates whose owning subtree is `social`.
+    """
+
+    host_id: str
+    node_id: str
+    id: str = field(default_factory=new_id)
+    label: str | None = None
+    created_at: float = field(default_factory=_now)
 
 
 # --- Tree invariants (pure; reused by every backend) --------------------------------

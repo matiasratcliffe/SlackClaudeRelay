@@ -126,6 +126,12 @@ here to capture intent; **no code now or in the improvement loop.**
 
 - **Purpose:** an agent whose long-term memory *is* this context graph — it enters by embedding
   match, traverses agentically, and assembles just-in-time context per task.
+- **Shared source of truth for ALL agents.** The graph is the single common knowledge base across
+  the owner's whole agent fleet. PI **sub-agents keep only their limited chat history as local
+  context**; anything durable they learn gets written INTO the graph — preference learnings into the
+  `preferences` node, factual learnings into `work-facts` / `personal-facts`, people into `social` —
+  using the opinionated structure's deterministic section ids (see INTERFACE.md). Chat history is
+  ephemeral working memory; the graph is where knowledge survives and is shared.
 - **Progressive disclosure of skills.** Skills/guidance live in (or alongside) the graph as
   behaviour nodes, distinct from pure context/knowledge (note 2's split). The agent discloses skills
   **dynamically and progressively** based on the active context subgraph — surfacing only relevant

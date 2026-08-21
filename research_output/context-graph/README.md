@@ -25,6 +25,20 @@ context-graph search "aurora mentor"
 context-graph traverse "who mentors me on aurora" --budget 6
 context-graph export --out vault-export  # open the folder as an Obsidian vault
 ```
+
+Deploy a persistent graph with the **opinionated macro-node taxonomy** (fixed section ids:
+`preferences`, `skills`, `work-facts`, `work-team`, `personal-facts`, `social`, … — see
+[docs/INTERFACE.md](docs/INTERFACE.md)):
+```bash
+context-graph --db mygraph.json init --structure opinionated
+context-graph --db mygraph.json add-node "Alex" --type person --parent social
+context-graph --db mygraph.json mount work-team <alex-id>   # navigation graft; social keeps ownership
+```
+**Mounts** solve multi-parent navigation without breaking the single-parent ownership tree (locks):
+a node has one owner but can appear in other hierarchy spots. **Secondary edges are wormholes** and
+carry extra context — endpoint similarity, tree distance, and a rationale — because their job is to
+justify hopping across otherwise-unrelated subtrees.
+[docs/INTERFACE.md](docs/INTERFACE.md) is the single human/agent contract (skill-ready).
 The default backend is in-memory with an **offline deterministic embedder** — no service or API key
 needed. It is process-local (ephemeral); use Neo4j for persistence.
 
