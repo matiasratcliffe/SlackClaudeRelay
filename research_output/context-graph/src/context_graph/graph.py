@@ -106,6 +106,28 @@ class ContextGraph:
         return assemble(self.store, self.embedder, query, budget_nodes=budget_nodes,
                         strategy=strategy, query_tags=query_tags)
 
+    # --- hub rollup (D8) ---
+    def recompute_hub_summaries(self, threshold: int = 3) -> list[str]:
+        """Write a rolled-up `summary` on every node whose degree ≥ threshold (top relations first).
+
+        Traversal reads a node's summary before its body, so hubs are entered summary-first. Returns
+        the ids updated. (Regeneration cadence — debounced/background — is out of scope here.)
+        """
+        updated: list[str] = []
+        for n in list(self.store.all_nodes()):
+            out = self.store.edges_from(n.id)
+            degree = len(out) + len(self.store.edges_to(n.id))
+            if degree < threshold:
+                continue
+            rels = sorted(out, key=lambda e: e.weight, reverse=True)[:5]
+            parts = [f"{'|'.join(e.verb_tags) or 'rel'}→"
+                     f"{(self.store.get_node(e.target_id) or _M()).title}" for e in rels]
+            summary = f"{n.title} — hub of {degree} relations: " + ", ".join(parts)
+            if self.locks.retry(lambda n=n, s=summary:
+                                self.store.cas_update("node", n.id, n.version, {"summary": s})):
+                updated.append(n.id)
+        return updated
+
     # --- integrity ---
     def contradictions(self) -> list[tuple[str, str, list[str]]]:
         """Candidate contradictions: `(source_id, functional_verb, [conflicting_target_ids])`."""
@@ -130,3 +152,8 @@ class ContextGraph:
             if (vset & set(e.verb_tags)) or (e.edge_embedding and cosine(emb, e.edge_embedding) >= self.dedup_threshold):
                 return e
         return None
+
+
+class _M:
+    """Placeholder for a missing node (defensive rendering)."""
+    title = "?"

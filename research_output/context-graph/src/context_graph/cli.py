@@ -16,6 +16,7 @@ from .export_obsidian import export_vault
 from .graph import ContextGraph
 from .model import NodeType
 from .sample import build_sample
+from .store.memory_store import MemoryStore
 
 
 def _build_graph(args) -> ContextGraph:
@@ -25,12 +26,23 @@ def _build_graph(args) -> ContextGraph:
                            os.environ["NEO4J_PASSWORD"])
         store.init()
         return ContextGraph(store, agent_id=args.agent)
-    g = ContextGraph(agent_id=args.agent)
+    db = getattr(args, "db", None)
+    if db:                                   # persistent memory backend
+        g = ContextGraph(MemoryStore.load(db), agent_id=args.agent)
+        g.ensure_root()
+        return g
+    g = ContextGraph(agent_id=args.agent)    # ephemeral: seed a sample so the CLI is demoable
     if not getattr(args, "empty", False):
-        build_sample(g)          # keep the memory CLI demoable
+        build_sample(g)
     else:
         g.ensure_root()
     return g
+
+
+def _persist(args, g) -> None:
+    db = getattr(args, "db", None)
+    if db and getattr(args, "backend", "memory") == "memory":
+        g.store.save(db)
 
 
 def _emit(obj, as_json: bool) -> None:
@@ -39,6 +51,8 @@ def _emit(obj, as_json: bool) -> None:
 
 def cmd_init(args):
     g = _build_graph(args)
+    g.ensure_root()
+    _persist(args, g)
     _emit(f"initialized ({args.backend}); nodes={len(list(g.store.all_nodes()))}", args.json)
 
 
@@ -46,13 +60,22 @@ def cmd_add_node(args):
     g = _build_graph(args)
     n = g.add_node(args.title, type=NodeType(args.type), body=args.body or "",
                    parent_id=args.parent, tags=args.tag or [])
+    _persist(args, g)
     _emit({"id": n.id, "title": n.title} if args.json else f"added {n.id} {n.title!r}", args.json)
 
 
 def cmd_link(args):
     g = _build_graph(args)
     e = g.link(args.source, args.target, verb_tags=args.verb or [], directed=not args.undirected)
+    _persist(args, g)
     _emit({"id": e.id} if args.json else f"linked {args.source}->{args.target} {e.id}", args.json)
+
+
+def cmd_summarize(args):
+    g = _build_graph(args)
+    updated = g.recompute_hub_summaries(args.threshold)
+    _persist(args, g)
+    _emit({"updated": updated} if args.json else f"summarized {len(updated)} hub(s)", args.json)
 
 
 def cmd_search(args):
@@ -100,6 +123,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="context-graph", description=__doc__)
     p.add_argument("--backend", choices=["memory", "neo4j"], default="memory")
     p.add_argument("--agent", default="cli", help="agent id for lock ownership/provenance")
+    p.add_argument("--db", help="JSON file to persist the memory backend across runs")
     p.add_argument("--empty", action="store_true", help="do not seed the sample graph (memory)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -126,6 +150,9 @@ def _parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("export"); e.set_defaults(func=cmd_export)
     e.add_argument("--out", default="vault-export")
+
+    sm = sub.add_parser("summarize"); sm.set_defaults(func=cmd_summarize)
+    sm.add_argument("--threshold", type=int, default=3, help="min degree to treat a node as a hub")
 
     sub.add_parser("lock-status").set_defaults(func=cmd_lock_status)
     sub.add_parser("demo").set_defaults(func=cmd_demo)
