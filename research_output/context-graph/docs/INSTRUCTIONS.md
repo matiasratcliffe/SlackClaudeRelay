@@ -4,25 +4,22 @@ This document records the **operating constraints** the owner set for building t
 It is the meta-contract for the autonomous agent doing the work — not part of the product.
 The product plan lives in [PLANNING.md](PLANNING.md); the wishlist in [BACKLOG.md](BACKLOG.md).
 
-## Budget
+## Budget / stopping condition
 
-- **Hard cap: US $50 of model spend for this endeavour.** Work continues round by round until
-  the accumulated estimate reaches $50, then **stop**.
-- Context: the owner has spent ~$200 this month, so this endeavour must not push the month past
-  **$250 total**.
-- When the $50 mark is hit, **do not silently continue**. Send a Slack notification (below), then
-  wait for the owner to decide whether to fund another $50 round.
-- Cost is **estimated** (the runtime exposes no exact dollar meter to the agent). The estimate is
-  tracked in [COST-LEDGER.md](COST-LEDGER.md) and is intentionally conservative (rounds up).
+- **No dollar cap.** Work continues until a **hard token/usage limit** is reached — either the
+  **Fable model's usage limit** or the **session token budget** — or until the scoped work is
+  reasonably complete (core build + one bounded improvement round; do not spin inventing features).
+- Token usage is tracked in [COST-LEDGER.md](COST-LEDGER.md) as a running note.
 
 ## Stop-and-report protocol
 
-On hitting the $50 mark (or finishing early), use the **`slack-notification`** skill
+On hitting a token/usage limit (or finishing the scoped work), use the **`slack-notification`** skill
 (`slack-notify "<message>"`) to DM the owner with:
-1. That the $50 mark was reached (or that the work finished under budget).
+1. **Which** limit stopped the work (Fable usage limit vs session token limit) — or that the scope
+   completed under the limits — and **how much** was used (the numbers).
 2. A short paragraph: **how far the work got**, and **what % of the total intended scope** was
    completed (honest estimate).
-Then halt and await the "go for another round" decision.
+Then halt and await the owner's decision on continuing.
 
 ## Token efficiency
 

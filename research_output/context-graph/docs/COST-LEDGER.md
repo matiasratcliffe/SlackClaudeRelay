@@ -1,11 +1,12 @@
-# Cost Ledger (estimated)
+# Usage Ledger
 
-Conservative running estimate of model spend for this endeavour. **Hard cap: $50.**
-No exact dollar meter is exposed to the agent, so this rounds up. Method: Opus-class rates
-(~$15/M input, ~$75/M output, reasoning priced as output), tallied per phase.
+Running note of session-token usage for this endeavour. **Stopping condition:** a hard token/usage
+limit (Fable model usage limit, or the session token budget ~15,000,000), or scoped-work completion.
+No dollar cap. Numbers are approximate (session-remaining snapshots).
 
-| # | Phase | Est. $ | Cumulative $ |
-|---|---|---|---|
-| 1 | Planning + scaffold + research-distill subagent + INSTRUCTIONS/COST docs | 4 | 4 |
+| Checkpoint | Session tokens remaining (approx) |
+|---|---|
+| Start of endeavour | ~15,000,000 |
+| Docs + scaffold + specs committed | ~14,930,000 |
 
-_Updated at each commit checkpoint._
+_Updated at commit checkpoints; final numbers go in the Slack stop-report._
