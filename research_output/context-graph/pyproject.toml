@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-graph"
+version = "0.1.0"
+description = "A dynamically traversable context knowledge graph for agent long-term memory."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []  # core runs dependency-free (in-memory store + offline embeddings)
+
+[project.optional-dependencies]
+neo4j = ["neo4j>=5.14"]                       # Neo4j backend (native vector index)
+embeddings = ["sentence-transformers>=2.2"]    # real embedding provider (offline fallback otherwise)
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.8"]
+
+[project.scripts]
+context-graph = "context_graph.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
