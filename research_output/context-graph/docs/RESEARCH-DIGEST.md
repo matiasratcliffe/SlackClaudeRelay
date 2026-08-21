@@ -8,7 +8,7 @@ Source: `research_agent-context-graphs-a-dynamically-traversable-kno_1787250205*
 
 **Secondary edge**: `{id, source_id, target_id, edge_embedding, verb_tags[], weight, version, created_at}`. It's a first-class row, not a bare foreign key — its own embedding enables "find edges similar to *mentors*," and its own version lets confidence/weight update without touching either endpoint.
 
-**Central resolution**: the tree encodes *ownership*, never meaning. Real entities are multi-faceted (a coworker who's also a friend), and forcing single-parent placement to represent "what this relates to" fights the structure constantly. Tree position answers one question — who administratively owns this node, for write authority, lock granularity, and default summarization scope — never "what is this connected to." Every relationship, even hierarchical-feeling ones (task belongs to project), lives on secondary edges only. This mirrors Zettelkasten/Obsidian/Roam: Luhmann's *folgezettel* (sequential hierarchical numbering) was abandoned once backlinks existed, since a good cross-link mechanism makes forced hierarchy stop paying for itself. Keeping the tree pays off operationally: subtree = lock scope, subtree = default rollup boundary.
+**Central resolution**: the tree encodes *ownership*, never meaning. Real entities are multi-faceted (a coworker who's also a friend), and forcing single-parent placement to represent "what this relates to" fights the structure constantly. Tree position answers one question — who administratively owns this node, for write authority, lock granularity, and default summarization scope — never "what is this connected to." Every relationship, even hierarchical-feeling ones, lives on secondary edges only. This mirrors Zettelkasten/Obsidian/Roam: Luhmann's *folgezettel* (sequential hierarchical numbering) was abandoned once backlinks existed, since a good cross-link mechanism makes forced hierarchy stop paying for itself. Keeping the tree pays off operationally: subtree = lock scope, subtree = default rollup boundary.
 
 **Hub nodes are structurally inevitable.** Any organically-grown graph converges on a power-law degree distribution (Barabasi-Albert preferential attachment: citation graphs, social graphs, personal KGs). Don't store a hub's incoming-edge list inside a versioned record every writer CAS-updates against (hot mutable key); model edges as an independent append-only log keyed by target — adding an edge is an insert, never a read-modify-write.
 
@@ -20,7 +20,7 @@ Node embeddings are the search key for traversal **entry points**: the query emb
 
 **Entry points feed traversal as weighted seeds, not a merge step** — a consequence of using Personalized PageRank (PPR, §3): PPR's personalization vector natively supports multiple restart nodes, each given initial mass proportional to cosine similarity (softmax-normalized across candidates). No separate merge logic is needed.
 
-Edge embeddings support entry-adjacent search too: matching a query against edge embeddings surfaces relevant *relationships* directly, and doubles as dedup — a new edge near-identical to an existing edge between the same two nodes should reinforce (bump confidence, refresh timestamp) rather than duplicate.
+Edge embeddings support entry-adjacent search too: matching a query against edge embeddings surfaces relevant *relationships* directly, and doubles as dedup — a near-identical edge between the same two nodes should reinforce (bump confidence, refresh timestamp) rather than duplicate.
 
 ## 3. Agentic/dynamic traversal strategies
 
@@ -31,15 +31,13 @@ Letting the LLM decide hop-by-hop whether to keep exploring fails both ways: it 
 - *Spreading activation* (ACT-R/Soar cognitive architectures): seed entry nodes with initial activation = embedding-similarity score, propagate with per-hop decay and edge-weight scaling — `activation(v) += activation(u) * decay^hop * edge_weight(u,v)` — stop a path once activation drops below threshold, hard max-hop cap as backstop. Pure numeric relaxation, no LLM call, sub-second at scale.
 - *Personalized PageRank (PPR)* — the formalized random-walk-with-restart version, used by **HippoRAG** (Gutierrez et al.), modeled on hippocampal indexing theory (hippocampus = lightweight associative index over content the neocortex stores). Pipeline: query embedding matches entities (entry points) → PPR propagates from seeds → top-ranked entities map back to content. It beats dense retrieval on multi-hop QA because PPR follows *edges* per hop, surfacing facts with zero textual resemblance to the query as long as they're relationship-connected to a match. Since your nodes/edges are already typed (no OpenIE extraction needed, unlike HippoRAG's raw-corpus origin), its PPR-over-graph algorithm can be lifted nearly directly as the mechanical layer.
 
-**Two-layer architecture**: the mechanical layer produces a bounded candidate subgraph in one cheap pass; only then does the LLM read it, judge relevance, and synthesize — exposed as tools (`search_similar`, `expand_edges`, `read_node`) so the agent judges content, not topology.
+**Two-layer architecture**: the mechanical layer produces a bounded candidate subgraph in one cheap pass; only then does the LLM read it, judge relevance, and synthesize — exposed as tools (`search_similar`, `expand_edges`, `read_node`).
 
 **Hub correction** (ACT-R's "fan effect": a node connected to everything dilutes signal to each neighbor): normalize activation by out-degree when propagating — PageRank's core move. Also don't let traversal stop *on* a hub normally — auto-maintain a rolled-up summary for any node above a degree threshold (GraphRAG's community-summary move, applied locally) and read the summary first, descending into only 1-2 relevant children.
 
-**Derived-hierarchy alternative**: Microsoft's **GraphRAG** builds an entity graph from LLM-extracted triples, then runs the **Leiden algorithm** (modularity-based community detection) to produce a derived, multi-level summary tree — hierarchy computed from connectivity density, nobody assigns ownership. "Global search" map-reduces top-down over community summaries; "local search" enters via entity-embedding match and expands along edges. Derived hierarchy adapts to real structure but is costly to keep current and can silently reshuffle boundaries — wrong as your primary lock-scope tree, but usable as an optional secondary re-filing suggestion, never a live dependency.
+**Derived-hierarchy alternative**: Microsoft's **GraphRAG** builds an entity graph from LLM-extracted triples, then runs the **Leiden algorithm** (modularity-based community detection) to produce a derived, multi-level summary tree — hierarchy computed from connectivity density, nobody assigns ownership. "Global search" map-reduces over community summaries; "local search" enters via entity-embedding match and expands along edges. Derived hierarchy adapts to real structure but is costly to keep current and can silently reshuffle boundaries — wrong as a primary lock-scope tree, but usable as an optional re-filing suggestion.
 
 ## 4. Concurrency & the RW lock-by-agent-id design
-
-Tree and graph layer have different contention profiles and need different mechanisms.
 
 **Tree backbone → pessimistic, multi-granularity hierarchical locking** (Gray et al., 1976 — the intent-lock scheme relational DBs use for table→page→row). Writing `work/project-x/task-7` takes intent-exclusive (IX) locks on `root`, `work`, `work/project-x`, and a full exclusive (X) lock only on `task-7`. Agents in disjoint subtrees never contend, since intent locks overlap only at the shared root and are mutually compatible. This works cleanly *because* the tree is strictly single-parent; a DAG-shaped ownership tree would make lock scope ambiguous once two "parents" claim write authority over a shared descendant.
 
@@ -47,7 +45,7 @@ Tree and graph layer have different contention profiles and need different mecha
 
 **Lock keying by agent-id**: track intent/exclusive locks per requesting agent-id, not per session — this enables detecting an agent re-entering its own lock, per-agent contention telemetry, and safe release of all locks an agent-id holds on disconnect or crash.
 
-**Pitfalls**: blocking a write on an LLM contradiction check breaks the "writes are fast" assumption CAS depends on — keep such checks async/queued; treating hub connectivity as node-internal locked state recreates the hot-key problem; letting derived hierarchy override assigned ownership silently invalidates lock-scope assumptions.
+**Pitfalls**: blocking writes on an LLM contradiction check breaks the "writes are fast" assumption CAS depends on — keep checks async/queued; treating hub connectivity as locked node-internal state recreates the hot-key problem; letting derived hierarchy override assigned ownership invalidates lock-scope assumptions.
 
 ## 5. Neo4j specifics
 
@@ -77,7 +75,7 @@ Export each node as one Markdown file with YAML front matter for structured prop
 
 Secondary edges become **wikilinks** (`[[Target Node Name]]`) in the body, optionally annotated with the verb-tag inline (`[[Jane Doe]] (mentors)`), so Obsidian's native backlink panel and graph view surface the relationship graph directly — reproducing the "tree = cosmetic storage, backlinks = real semantic weight" pattern from prior art. This design is stronger than plain Obsidian since the tree still carries ownership/lock semantics rather than being purely cosmetic.
 
-Obsidian's built-in graph view renders folders + wikilinks with no extra tooling — sufficient for a human to eyeball what agents have built. Dataview can query front-matter fields across the vault for ad hoc reporting; Canvas files can snapshot a specific traversal result (entry point + activated subgraph) for debugging one retrieval.
+Obsidian's built-in graph view renders folders + wikilinks with no extra tooling — sufficient to eyeball what agents have built. Dataview can query front-matter fields across the vault for ad hoc reporting; Canvas files can snapshot one traversal result (entry point + activated subgraph) for debugging.
 
 ## 7. Prior art / comparable systems
 
