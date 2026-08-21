@@ -14,4 +14,8 @@ No dollar cap. Numbers are approximate (session-remaining snapshots).
 reached; paused at scoped-work completion (core build + one improvement round) for owner review, per
 the "don't go wild" / round-by-round model.
 
+| Round 2 (structure templates, mounts, wormhole edges, INTERFACE) committed | ~14,962,000 |
+
+**Round-2 total: ~38,000 session tokens (~US$4–6 est. at Opus-class rates).**
+
 _Updated at commit checkpoints; final numbers go in the Slack stop-report._
