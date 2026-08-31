@@ -57,7 +57,7 @@ async def _web_only(tool_name, tool_input, context):
 
 def _options():
     return ClaudeAgentOptions(
-        model="claude-sonnet-5",     # hardcoded — cheaper than Opus for these runs
+        model=os.environ.get("RESEARCH_MODEL", "claude-sonnet-5"),  # default cheap; override per run
         system_prompt={"type": "preset", "preset": "claude_code",
                        "append": "Aim for clear, accurate, well-organised answers. Be substantive "
                                  "but concise — cover what matters without padding."},
