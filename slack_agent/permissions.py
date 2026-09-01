@@ -125,10 +125,17 @@ def make_can_use_tool(queue):
                 await queue.ask(
                     f":lock: guarded `{tool_name}`\n```{desc}```\napprove? (yes/no)"
                 )
-            ).strip().lower()
-            if reply in _YES:
+            ).strip()
+            if reply.lower() in _YES:
                 return PermissionResultAllow(updated_input=input_data)
-            return PermissionResultDeny(message=f"User denied: {reply!r}")
+            # Any reply that isn't an explicit approval = rejection; surface the
+            # operator's exact words so Claude treats them as feedback to act on.
+            return PermissionResultDeny(
+                message=(
+                    f"Operator did NOT approve. Treat this as their feedback and act on it: {reply}"
+                    if reply else "Operator rejected (no reason given)."
+                )
+            )
 
         return PermissionResultAllow(updated_input=input_data)
 
